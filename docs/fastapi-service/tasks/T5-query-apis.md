@@ -82,10 +82,16 @@ class OhlcvItem(BaseModel):
 ```
 
 - `GET /api/signals` → `{"items":[SignalItem...], "total":int, "limit":int, "offset":int}`，
-  query：`date`（`YYYY-MM-DD`）、`strategy`（类名或 webhook_key 都接受）、
-  `symbol`、`limit`（默认 100，`le=1000`）、`offset`。
-  **`date` 与 `strategy` 至少要给一个**，否则等于全表扫，返回 400
+  query：`date`（`YYYY-MM-DD`，单日）、或 `start` + `end`（**闭区间**，供前端看板的
+  "近 7/30 天"筛选使用，见 [03 §6](../03-frontend-and-auth.md)）、
+  `strategy`（类名或 webhook_key 都接受）、`symbol`、
+  `limit`（默认 100，`le=1000`）、`offset`。
+  `date` 与 `start`/`end` **同时给时以 `date` 为准并返回 400**
+  `detail={"code":"conflicting_filters"}`（静默取舍会让前端调试时抓不到为什么结果不对）。
+  **日期类参数至少要给一个**，否则等于全表扫，返回 400
   `detail={"code":"missing_filter"}`（这条防误用，写进 OpenAPI description）。
+  注意 `signal` 表按 `trade_date` 存文本日期，`YYYY-MM-DD` 形式的字符串区间比较与时间序一致，
+  可直接用 `BETWEEN ? AND ?` 参数化查询。
 - `GET /api/tasks/{id}/signals` → 同样 items 列表，不分页（单任务最多几十条）。
 - `name` 的补齐：一次 `get_stock_names(去重后的 symbols)`，**严禁 N+1**
   （不要循环里逐只查）。`stock_basic` 是小表，一次 `IN` 查询足够。
@@ -115,7 +121,10 @@ class OhlcvItem(BaseModel):
 fixture：临时建 `stock_daily` + `stock_basic`，插入 3 只股票 × 5 天数据 + 若干信号行。
 
 - `GET /api/signals?date=...` 返回正确条数、`total` 正确、`name` 已补齐。
-- `GET /api/signals`（无过滤）→ 400 `missing_filter`。
+- `GET /api/signals?start=2026-01-01&end=2026-01-31` 命中**闭区间**边界
+  （造数据时特意在 `start` 与 `end` 当天各放一条，断言两条都在结果里）。
+- `GET /api/signals`（无过滤）→ 400 `missing_filter`；
+  `date` 与 `start` 同时给 → 400 `conflicting_filters`。
 - `strategy` 用类名和用 `webhook_key` 两种写法结果一致。
 - 分页：`limit=2` 遍历全部，各页**无重复无遗漏**（把 items 拼起来与不分页结果比较）。
 - `GET /api/market/000001/ohlcv` 默认返回升序、`limit` 生效；

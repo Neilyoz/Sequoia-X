@@ -62,12 +62,14 @@ Sequoia-X/
 │   │   └── manager.py               # TaskManager：单飞 + 线程池
 │   ├── api/                         ★ HTTP 层
 │   │   ├── __init__.py
-│   │   ├── app.py                   # create_app() / lifespan / 中间件 / 异常处理
+│   │   ├── app.py                   # create_app() / lifespan / 中间件 / 异常处理 / 静态挂载
+│   │   ├── auth.py                  ★ T7 会话表 + 鉴权判定唯一入口 authenticate()
 │   │   ├── deps.py                  # 依赖注入：鉴权、Settings、TaskManager、DataEngine
 │   │   ├── schemas.py               # 请求/响应 pydantic 模型
 │   │   └── routes/
 │   │       ├── __init__.py
 │   │       ├── system.py            # /health /api/info /api/strategies
+│   │       ├── auth.py              ★ T7 /api/auth/login|logout|me
 │   │       ├── tasks.py             # /api/tasks/*
 │   │       └── queries.py           # /api/signals /api/market/*
 │   ├── scheduler/                   ★ 定时层
@@ -84,8 +86,27 @@ Sequoia-X/
     ├── test_task_store.py           ★
     ├── test_task_manager.py         ★
     ├── test_api_*.py                ★（按路由分文件）
+    ├── test_api_auth_session.py     ★ T7
+    ├── test_static_hosting.py       ★ T7
     └── test_scheduler.py            ★
 ```
+
+### 2.1 前端工程（T8，独立 npm 项目）
+
+```
+frontend/                            ★ Next.js 16.3 + TS + Tailwind，只有 / 与 /login 两个路由
+├── package.json                     # next@~16.3.0；package-lock.json 入库
+├── next.config.ts                   # output:'export' / trailingSlash / images.unoptimized
+│                                    #   rewrites 代理 /api → :8000（仅 next dev 生效）
+├── .gitignore                       # node_modules/ .next/ out/
+└── src/app/                         # layout.tsx · page.tsx · login/page.tsx · lib/ · components/
+scripts/
+├── build_frontend.sh / .ps1         ★ T8：npm ci + lint + tsc + build + 产物断言
+└── smoke_test.sh   / .ps1           ★ T6：起服务打接口的冒烟验证
+```
+
+`frontend/out/`（构建产物）**不入库**，由脚本现场生成；生产环境由 FastAPI
+`StaticFiles` 挂载在 `/`，与 API 同源同端口。详见 [03-frontend-and-auth.md](./03-frontend-and-auth.md)。
 
 ## 3. 共享接口契约（跨任务，签名不得擅改）
 
@@ -239,10 +260,15 @@ class TaskStore:
     def list(self, *, kind=None, status=None, limit=50, offset=0) -> tuple[list[TaskRecord], int]
     def active(self) -> TaskRecord | None                   # 非终态任务，单飞判定的兜底
     def save_signals(self, task_id, trade_date, outcomes) -> int
-    def query_signals(self, *, trade_date=None, strategy=None, symbol=None, limit, offset)
+    def query_signals(self, *, trade_date=None, start=None, end=None,
+                      strategy=None, symbol=None, limit, offset)
     def append_log_tail(self, task_id: str, lines: list[str]) -> None   # 见 3.6
     def prune(self, keep: int) -> None                      # 只保留最近 keep 条任务及其信号
+    def recover_interrupted(self) -> int                    # 启动时把非终态标记为 failed
 ```
+
+> 日志尾部**不是**单独存储的：由 `TaskManager` 在任务结束时塞进 `result_json.log_tail`，
+> 所以 `TaskStore` 不需要 `append_log_tail` 之类的方法（早期草稿有，已删，避免实现出两套）。
 
 服务启动时 `init_schema()`；将上次进程遗留的 `pending/running` 记录**一律标记为
 `failed`，`error="进程重启导致任务中断"`**（否则重启后单飞锁会被脏数据永久占住）。
@@ -279,17 +305,23 @@ class TaskManager:
 - 异常 → `status=FAILED`，`error` 存 `f"{type(exc).__name__}: {exc}"` + traceback 尾部。
 - **成功/失败都必须推进到终态**，任何路径遗留非终态记录都是缺陷（会让单飞永久卡死）。
 
-### 3.8 `sequoia_x/api/deps.py` 单例持有（T3）
+### 3.8 `sequoia_x/api/deps.py` 单例持有（T3，T7 扩展）
 
-`app.state` 上挂 `settings` / `engine` / `store` / `manager` / `scheduler`。
+`app.state` 上挂 `settings` / `engine` / `store` / `manager` / `scheduler` / `sessions`
+（最后一个是 T7 的 `SessionStore`）。
 `deps.py` 用 `fastapi.Depends` 从 `request.app.state` 取，**不使用模块级全局单例**
 （否则测试无法构造第二个 app）。
+鉴权判定统一走 `api/auth.py:authenticate()`，`deps.py` 只负责把它包成依赖
+（禁止在 router 里内联比较 key —— 那会让 T7 的 session 支持变成到处补洞）。
 
 ## 4. HTTP 接口全表（T3/T4/T5 汇总）
 
 | 方法 | 路径 | 鉴权 | 归属 | 说明 |
 | --- | --- | --- | --- | --- |
 | GET | `/health` | 否 | T3 | 存活探针，返回 `{"status":"ok"}` |
+| POST | `/api/auth/login` | 否（本身是登录入口） | T7 | body `{"api_key":str}` → 下发 HttpOnly session cookie |
+| POST | `/api/auth/logout` | cookie | T7 | 撤销会话并清 cookie，返回 204 |
+| GET | `/api/auth/me` | cookie 或 key | T7 | 前端启动时判断登录态；返回 `mode`：`session`/`apikey`/`open` |
 | GET | `/api/info` | 是 | T3 | 版本、时区、调度开关与 cron、策略数、活跃任务 |
 | GET | `/api/strategies` | 是 | T3 | 策略清单：类名、`webhook_key`、是否已配专属 webhook |
 | POST | `/api/tasks/daily` | 是 | T3 | 触发日常跑批，body `{push?:bool, strategies?:[str]}`，202 → TaskRecord |
@@ -297,16 +329,24 @@ class TaskManager:
 | GET | `/api/tasks` | 是 | T3 | 历史列表，query `kind,status,limit,offset` |
 | GET | `/api/tasks/{task_id}` | 是 | T3 | 详情，含 `result` 与 `log_tail` |
 | GET | `/api/tasks/{id}/signals` | 是 | T5 | 该任务的选股结果 |
-| GET | `/api/signals` | 是 | T5 | 跨任务选股结果，query `date,strategy,symbol,limit,offset` |
+| GET | `/api/signals` | 是 | T5 | 跨任务选股结果，query `date`/`start`+`end`,`strategy,symbol,limit,offset` |
 | GET | `/api/market/{symbol}/ohlcv` | 是 | T5 | 日线，query `start,end,limit` |
 | GET | `/api/market/{symbol}/basic` | 是 | T5 | 股票名称等基础信息 |
+| GET | `/`、`/login/` | 否 | T7 | Next.js 静态产物（`frontend/out`，目录不存在时不挂载） |
+
+鉴权列的"是"= T7 之后接受 **session cookie 或 `X-API-Key` 任一**；
+`API_KEY` 未配置时全部放行（开发语义）。判定逻辑唯一实现在 `api/auth.py:authenticate()`。
+cookie 模式下的写操作额外要求 `X-Sequoia-Client: web` 头（CSRF 第二道防线，见 03 §4）。
 
 响应约定：
 
 - 触发类成功 **202 Accepted**（不是 200/201，语义是"已接受待执行"）。
 - 单飞冲突 **409 Conflict**，`detail` 为 `{"code":"task_already_running","task_id":...,"kind":...}`。
 - 未知路径/参数 **422**（FastAPI 默认）；未知策略名 **400**。
-- 鉴权失败 **401**，`{"detail":{"code":"unauthorized"}}`，**不区分"key 不存在"与"key 不对"**。
+- 鉴权失败 **401**，`{"detail":{"code":"unauthorized"}}`，**不区分"key 不存在"与"key 不对"**；
+  登录凭据错误 **401** `{"detail":{"code":"invalid_credentials"}}`（与前者区分，
+  前端据此决定跳登录页还是提示重试）；cookie 模式写操作缺 `X-Sequoia-Client` → **403**
+  `{"code":"missing_client_header"}`；登录暴力尝试超限 → **429**。
 - 任务不存在 **404**。
 - 所有时间字段 ISO8601 带 `+08:00` 偏移。
 
@@ -323,12 +363,23 @@ class TaskManager:
 | `TASK_DB_PATH` | `data/tasks.db` | 任务/信号库 |
 | `TASK_HISTORY_LIMIT` | `200` | 超出的历史任务在启动时裁剪 |
 | `TASK_LOG_TAIL_LINES` | `200` | 每任务保留的日志行数 |
+| `SESSION_TTL_SECONDS` | `604800` | 登录会话有效期（7 天），T7 |
+| `FRONTEND_DIST_PATH` | `frontend/out` | Next.js 静态导出产物目录，T7 |
+| `SERVE_FRONTEND` | `true` | 关闭则只提供 API（T7） |
 
 ## 6. 依赖变更
 
 `pyproject.toml` 主依赖新增：`fastapi`、`uvicorn[standard]`、`apscheduler>=3.10,<4`。
-dev 可选组新增：`httpx`（TestClient 需要）、`pytest-asyncio`。
-**不引入** pydantic v1 兼容层、SQLAlchemy、alembic、celery、redis。
+dev 可选组新增：`httpx`（TestClient 需要）、`pytest-asyncio`（若 T3 用到）。
+**不引入** pydantic v1 兼容层、SQLAlchemy、alembic、celery、redis、`python-multipart`
+（登录用 JSON body，不需要表单解析）。
 
-安装方式（本机用 uv，venv 是 Python 3.14）：`uv sync --extra dev`。
-改完 `pyproject.toml` 必须同步 `uv.lock` 并一并提交。
+前端依赖独立在 `frontend/package.json`，与 Python 侧无交叉：
+`next@~16.3.0`、`react`、`typescript`、`tailwindcss`、`eslint-config-next`。
+**不引入**组件库、图表库、状态管理库、第三方请求库（用原生 `fetch`）。
+
+安装方式：Python 侧 `uv sync --extra dev`（本机 venv 为 Python 3.14）；
+前端侧 `cd frontend && npm ci`（本机 Node 24.19 / npm 12）。
+改完 `pyproject.toml` 必须同步 `uv.lock`；改完 `package.json` 必须同步
+`package-lock.json`。两者都要一并提交。
+**前端包管理器统一 npm，禁止混用 pnpm/yarn 造出第二份锁文件。**

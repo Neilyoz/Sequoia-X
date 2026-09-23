@@ -120,6 +120,11 @@ def get_store(request: Request) -> TaskStore
 - 路由级挂依赖：在 `tasks.py` / `system.py`（除 `/health`）的 `APIRouter(dependencies=[Depends(require_api_key)])`
   上声明，**不要每个函数各挂一遍**（漏一个就是安全洞）。
   `/health` 用独立 router 或在 `include_router` 时不带依赖，保证免鉴权。
+- **为 T7 预留的架构要求**：T7 要把鉴权升级成"session cookie 或 API Key 二者之一"
+  （见 [03 §3](../03-frontend-and-auth.md)）。因此本任务必须把**判定逻辑收敛进一个函数**
+  `authenticate(...) -> AuthContext`，`require_api_key` 只是它的一个薄包装依赖。
+  这样 T7 只需扩 `authenticate()`，不必重写各 router 的依赖声明。
+  禁止在路由函数体内散落 `if x_api_key != settings.api_key` 这类内联比较。
 
 ### 4.4 `schemas.py`
 

@@ -185,7 +185,9 @@ def _execute(self, task_id, kind, params):
   （你定，注释说明）。
 - `save_signals()` 幂等（同 `(task_id, strategy, symbol)` 重复写不报错、不重复）。
 - `prune(keep=2)`：造 5 条任务，保留最近 2 条，信号级联清理。
-- `query_signals()` 按 `trade_date` / `strategy` / `symbol` 过滤 + 分页正确。
+- `query_signals()` 按 `trade_date` / `start`+`end` 区间（闭区间）/ `strategy` / `symbol`
+  过滤 + 分页正确。签名以架构 §3.5 为准（`start`/`end` 是给 T5 前端日期区间用的，
+  本任务先把存储层能力建全，避免 T5 回头改 store）。
 
 `tests/test_task_manager.py`
 - patch `pipeline.run_daily` 为可控假函数（用 `threading.Event` 卡住它）。

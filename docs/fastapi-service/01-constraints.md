@@ -7,9 +7,16 @@
 
 ## §0 为什么必须串行
 
-`main.py` → `runner` → `task manager` → `api routes` 是一条单向调用链，下游 import 上游。
-两个 agent 并行改这条链会在 import 层面互相引用不存在的符号。此外本仓库是**单个 git 工作树**，
-没有为并行改动准备隔离分支。**默认串行派单。**
+`main.py` → `runner` → `task manager` → `api routes` → `auth` → `frontend` 是一条单向调用链，
+下游 import 上游。两个 agent 并行改这条链会在 import 层面互相引用不存在的符号。
+此外本仓库是**单个 git 工作树**，没有为并行改动准备隔离分支。**默认串行派单。**
+
+执行顺序：T1 → T2 → T3 → T4 → T5 → T7 → T8 → T6（T6 是收口）。
+唯二可并行的是 T4 与 T5（T3 合入后，文件集合不相交）；T7 与 T8 **不可**并行。
+
+本文其余约束**只适用于 Python 侧**。前端（T8）有自己的规范，见
+[03-frontend-and-auth.md §9](./03-frontend-and-auth.md)；但 §5（不碰行情库）、
+§6（不产生外部副作用）、§10（交付纪律）对前端任务同样生效。
 
 ---
 
