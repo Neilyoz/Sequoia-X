@@ -164,6 +164,33 @@ class DataEngine:
             )
         return df
 
+    def get_ohlcv_range(self, symbol: str, *, start: str | None = None,
+                        end: str | None = None, limit: int = 250) -> pd.DataFrame:
+        """按日期区间倒序取至多 limit 条日线（只读，不触发任何网络同步）。
+
+        查询接口专用（T5 §4.2）：倒序取是为了 limit 命中最近的交易日，
+        返回前重排为升序（响应给人看图用）。limit 在数据层再 min 一道
+        兜底（入口层 pydantic le=500 是第一道，约束 §5 的 LIMIT 硬要求），
+        start/end 的格式校验属于入口层职责，数据层不重复做（T5 §4.1）。
+        """
+        where = ["symbol = ?"]
+        args: list[object] = [symbol]
+        if start is not None:
+            where.append("date >= ?")
+            args.append(start)
+        if end is not None:
+            where.append("date <= ?")
+            args.append(end)
+        args.append(max(1, min(limit, 500)))
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql(
+                "SELECT date, open, high, low, close, volume, turnover FROM stock_daily"
+                f" WHERE {' AND '.join(where)} ORDER BY date DESC LIMIT ?",
+                conn,
+                params=args,
+            )
+        return df.sort_values("date", kind="stable").reset_index(drop=True)
+
     @staticmethod
     def _to_baostock_code(symbol: str) -> str:
         """将纯数字代码转为 baostock 格式：6/9开头 -> sh，其余 -> sz。"""

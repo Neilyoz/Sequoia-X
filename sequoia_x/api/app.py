@@ -18,11 +18,12 @@ from uuid import uuid4  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 
-from sequoia_x.api.routes import system, tasks  # noqa: E402
+from sequoia_x.api.routes import queries, system, tasks  # noqa: E402
 from sequoia_x.core.config import Settings, get_settings  # noqa: E402
 from sequoia_x.core.logger import get_logger  # noqa: E402
 from sequoia_x.data.engine import DataEngine  # noqa: E402
 from sequoia_x.runner.registry import STRATEGY_KEYS, UnknownStrategyError  # noqa: E402
+from sequoia_x.scheduler.jobs import build_scheduler  # noqa: E402
 from sequoia_x.task.manager import TaskManager  # noqa: E402
 from sequoia_x.task.models import TaskAlreadyRunning, _now_iso  # noqa: E402
 from sequoia_x.task.store import TaskStore  # noqa: E402
@@ -60,9 +61,21 @@ async def lifespan(app: FastAPI):
     if not settings.api_key:
         logger.warning("未配置 API_KEY，服务将以无鉴权模式运行，请确保只监听回环地址")
 
-    # T4 调度器接线点：此处按 settings.scheduler_enabled 构建 scheduler 并赋值
-    # app.state.scheduler（占位 None 已在 create_app 挂好），退出时负责其 shutdown。
+    # T4 调度器：回调只经 TaskManager.submit 走单飞锁（约束 §3），cron 非法或
+    # 未启用时 build_scheduler 返回 None，服务照常启动（scheduler_running 如实反映）。
+    scheduler = build_scheduler(settings, manager)
+    if scheduler is not None:
+        scheduler.start()
+        logger.info(f"定时调度已启动：{settings.schedule_cron} ({settings.timezone})")
+    app.state.scheduler = scheduler
     yield
+
+    # 退出期异常不该刷屏（任务在跑完前不硬切，shutdown 只停调度线程）。
+    if scheduler is not None:
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception:
+            pass
 
     # wait=False：正在跑的 baostock 任务被硬切会留下脏 socket，比等它跑完更糟（T2 语义）。
     manager.shutdown(wait=False)
@@ -127,12 +140,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = None  # lifespan 填真实例（架构 §3.8 的对象清单）
     app.state.store = None
     app.state.manager = None
-    app.state.scheduler = None  # T4 接线
+    app.state.scheduler = None  # 真实调度器由 lifespan 装配（T4）
     _register_exception_handlers(app)
     # /health 独立 router：探针免鉴权（架构 §4）
     app.include_router(system.health_router)
     app.include_router(system.router)
     app.include_router(tasks.router)
+    app.include_router(queries.router)
     return app
 
 

@@ -36,6 +36,9 @@ def info(request: Request) -> dict[str, object]:
         "version": request.app.version,
         "timezone": settings.timezone,
         "scheduler_enabled": settings.scheduler_enabled,
+        # 配置值与实际启动结果分开报：只起了一半（配置开但 cron 非法）时
+        # 这两个字段不一致就是唯一的排查线索（T4 §4.5）。
+        "scheduler_running": request.app.state.scheduler is not None,
         "schedule_cron": settings.schedule_cron,
         "strategy_count": len(get_all_strategies()),
         "active_task_id": active.task_id if active else None,

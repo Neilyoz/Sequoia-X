@@ -115,6 +115,8 @@ def test_info_fields_complete_and_configurable(tmp_path) -> None:
         "version",
         "timezone",
         "scheduler_enabled",
+        # T4 §4.5 增补：配置值与实际启动结果双字段暴露，不一致即 cron 写错
+        "scheduler_running",
         "schedule_cron",
         "strategy_count",
         "active_task_id",
@@ -124,6 +126,8 @@ def test_info_fields_complete_and_configurable(tmp_path) -> None:
     assert body["version"] == "3.0.0"
     assert body["timezone"] == "Asia/Shanghai"
     assert body["scheduler_enabled"] is False
+    # 测试配置未启用调度 → lifespan 不会装配 scheduler，running 必须跟随为 False
+    assert body["scheduler_running"] is False
     assert body["schedule_cron"] == "15 19 * * 1-5"
     assert body["strategy_count"] == len(STRATEGY_CLASSES)
     assert body["active_task_id"] is None

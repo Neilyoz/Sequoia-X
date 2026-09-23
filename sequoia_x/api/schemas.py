@@ -63,6 +63,9 @@ class InfoResponse(BaseModel):
     version: str
     timezone: str
     scheduler_enabled: bool
+    # 与 scheduler_enabled 不一致即为 cron 写错（build_scheduler 返回 None）——
+    # 这是唯一的排查线索，T4 §4.5 要求两者必须都返回。
+    scheduler_running: bool
     schedule_cron: str
     strategy_count: int
     active_task_id: str | None
@@ -74,3 +77,67 @@ class HealthResponse(BaseModel):
     """GET /health 的存活探针响应。"""
 
     status: str
+
+
+# ── T5 查询接口响应模型（架构 §4 接口全表）──
+
+
+class SignalItem(BaseModel):
+    """一条选股信号（signal 表的对外视图，T5 §4.3）。
+
+    name 来自行情库 stock_basic 批量补齐，未收录的代码为 null；
+    xueqiu_code 与飞书卡片共用同一套 SH/SZ/BJ 映射，避免两处两种写法。
+    """
+
+    trade_date: str
+    strategy: str
+    webhook_key: str
+    symbol: str
+    name: str | None
+    xueqiu_code: str
+
+
+class SignalListResponse(BaseModel):
+    """GET /api/signals 的分页信封；total 为过滤后的总条数。"""
+
+    items: list[SignalItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class TaskSignalsResponse(BaseModel):
+    """GET /api/tasks/{id}/signals：单任务信号明细，不分页（最多几十条）。"""
+
+    task_id: str
+    items: list[SignalItem]
+    total: int
+
+
+class OhlcvItem(BaseModel):
+    """一条日线行情；字段与 stock_daily 列一致（不含内部自增 id）。"""
+
+    date: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    turnover: float
+
+
+class OhlcvResponse(BaseModel):
+    """GET /api/market/{symbol}/ohlcv：items 按 date 升序（T5 §4.2）。"""
+
+    symbol: str
+    xueqiu_code: str
+    items: list[OhlcvItem]
+    total: int
+
+
+class StockBasicResponse(BaseModel):
+    """GET /api/market/{symbol}/basic：本地 stock_basic 未收录时 name 为 null。"""
+
+    symbol: str
+    name: str | None
+    xueqiu_code: str
