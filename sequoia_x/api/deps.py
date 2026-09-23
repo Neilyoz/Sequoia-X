@@ -1,17 +1,27 @@
-"""依赖注入：鉴权判定唯一入口 + 从 app.state 取进程级对象（架构 §3.8）。
+"""依赖注入：鉴权依赖接线 + 从 app.state 取进程级对象（架构 §3.8）。
 
 刻意不使用模块级全局单例：所有对象都从 ``request.app.state`` 取，这样测试才能
 构造互不污染的第二个 app（架构 §3.8）。本模块 import 了 task 层符号，
 因此只能在 ``sequoia_x.api.app``（其模块顶层已先执行 bootstrap）之后被导入。
+
+T7 起鉴权判定本体迁到 ``api/auth.py``（会话表是判定的必需前置），本模块只负责
+"路由 → 鉴权依赖"的接线，路由侧统一只见 ``require_auth``。
 """
 
-import hmac
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from fastapi import HTTPException, Request, Security
-from fastapi.security import APIKeyHeader
+from fastapi import Request
 
+from sequoia_x.api.auth import (
+    AuthContext,
+    LoginRateLimiter,
+    SessionStore,
+    api_key_header,
+    authenticate,
+    get_login_limiter,
+    get_session_store,
+    require_auth,
+)
 from sequoia_x.core.config import Settings
 from sequoia_x.task.manager import TaskManager
 from sequoia_x.task.store import TaskStore
@@ -19,58 +29,27 @@ from sequoia_x.task.store import TaskStore
 if TYPE_CHECKING:  # 仅为类型标注引入，运行期不让 deps 提前拉起 baostock 守卫
     from sequoia_x.data.engine import DataEngine
 
-# auto_error=False：key 缺失与 key 错误都收敛到 authenticate() 的同一个 401，
-# 保证两种失败形态响应完全一致（架构 §4：不区分"key 不存在"与"key 不对"）。
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+# 显式声明"从 auth 层转出来的名字"是本模块的公开面，避免 ruff 把 re-export 判成未用导入。
+__all__ = [
+    "AuthContext",
+    "LoginRateLimiter",
+    "SessionStore",
+    "api_key_header",
+    "authenticate",
+    "get_engine",
+    "get_login_limiter",
+    "get_manager",
+    "get_session_store",
+    "get_settings_dep",
+    "get_store",
+    "require_api_key",
+    "require_auth",
+]
 
-
-@dataclass(frozen=True)
-class AuthContext:
-    """一次鉴权判定的结果。
-
-    ``mode`` 取值是对外契约（T7 的 ``GET /api/auth/me`` 会原样暴露）：
-    - ``open``：未配置 API_KEY，服务运行在无鉴权模式；
-    - ``apikey``：凭 X-API-Key 头放行；
-    - ``session``：T7 将新增（HttpOnly session cookie）。
-    """
-
-    mode: str
-
-
-def authenticate(request: Request, x_api_key: str | None = None) -> AuthContext:
-    """鉴权判定的**唯一**入口；判定逻辑禁止散落到路由体或各依赖函数里（T3 §4.3）。
-
-    判定顺序与 03-frontend-and-auth.md §3 对齐（session 分支是 T7 的活）：
-    1. 未配置 API_KEY → 直接放行（本地开发语义，启动时已打 WARNING）；
-    2. T7：请求带合法 session cookie → 放行；
-    3. 请求带正确 X-API-Key → 放行；
-    4. 否则统一 401，detail 不回显 key 的任何片段。
-
-    用 ``hmac.compare_digest`` 做常量时间比较：本地服务被时序攻击的概率极低，
-    但成本为零，没有理由用 ``==``。
-
-    T7 接线说明：届时在本函数内加入 ``request.app.state.sessions`` 的 cookie
-    分支，并把本函数与 :class:`AuthContext` 迁移到 ``api/auth.py``；
-    ``require_api_key`` 与各 router 的依赖声明都不用动。
-    """
-    settings: Settings = request.app.state.settings
-    if not settings.api_key:
-        return AuthContext(mode="open")
-    if x_api_key is not None and hmac.compare_digest(x_api_key, settings.api_key):
-        return AuthContext(mode="apikey")
-    raise HTTPException(status_code=401, detail={"code": "unauthorized"})
-
-
-def require_api_key(
-    request: Request,
-    x_api_key: str | None = Security(api_key_header),
-) -> AuthContext:
-    """薄包装依赖：只做"取头 → 交给 authenticate()"，不含任何判定逻辑。
-
-    挂在 APIRouter 的 dependencies 上（router 级声明），禁止逐函数各挂一遍——
-    漏一个就是安全洞（T3 §4.3）。
-    """
-    return authenticate(request, x_api_key)
+# T3 兼容别名：语义与 require_auth **完全一致**（含 cookie 分支与 CSRF 写守卫）。
+# 刻意用别名而不是"再写一个只认 header 的依赖"——两条判定路径迟早分叉，
+# 漏改一处就是静默的鉴权降级。新代码一律用 require_auth。
+require_api_key = require_auth
 
 
 def get_settings_dep(request: Request) -> Settings:

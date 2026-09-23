@@ -10,7 +10,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from sequoia_x.api.deps import get_manager, require_api_key
+from sequoia_x.api.deps import get_manager, require_auth
 from sequoia_x.api.schemas import DailyTaskRequest, TaskListResponse, TaskResponse
 from sequoia_x.runner.registry import resolve
 from sequoia_x.task.models import TaskKind, TaskStatus
@@ -18,7 +18,7 @@ from sequoia_x.task.models import TaskKind, TaskStatus
 router = APIRouter(
     prefix="/api/tasks",
     tags=["tasks"],
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_auth)],
 )
 
 

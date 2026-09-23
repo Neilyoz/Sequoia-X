@@ -19,7 +19,7 @@ from typing import Any
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from sequoia_x.api.deps import get_engine, get_store, require_api_key
+from sequoia_x.api.deps import get_engine, get_store, require_auth
 from sequoia_x.api.schemas import (
     OhlcvResponse,
     SignalItem,
@@ -51,7 +51,7 @@ _SIGNAL_ORDER_BY = " ORDER BY trade_date DESC, strategy, symbol, id"
 # 1000 永远不截断，只防脏数据把响应撑爆。
 _TASK_SIGNALS_LIMIT = 1000
 
-router = APIRouter(prefix="/api", tags=["queries"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/api", tags=["queries"], dependencies=[Depends(require_auth)])
 
 
 def _read_only_connection(db_path: str) -> sqlite3.Connection:

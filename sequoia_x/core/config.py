@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"  # API_KEY 为空（无鉴权）时必须保持回环，见 .env.example 风险说明
     api_port: int = 8000
     api_key: str = ""  # 空串的语义是"不启用鉴权"，启动时会打 WARNING（T3 §4.2）
+    # T7 会话与静态托管字段（03-frontend-and-auth.md §3/§5）：同样全部带默认值，
+    # 老 .env 一个字不改也能启动（约束 §7）。
+    session_ttl_seconds: int = 604800  # 7 天；不设滑动过期（03 §3：简单优先，重启即全员重登）
+    frontend_dist_path: str = "frontend/out"  # Next.js 静态导出产物目录（相对当前工作目录）
+    serve_frontend: bool = True  # 关掉即"只提供 API"；产物缺失时也会自动降级，见 api/app.py
     scheduler_enabled: bool = False  # T4 消费；默认关，防止一 clone 就到点往真人群推消息（约束 §6）
     schedule_cron: str = "15 19 * * 1-5"  # T4 消费；标准 5 段 cron
     # TIMEZONE 有两个消费方且刻意不同源：task/models.py 的 _now_iso 直接读 os.environ

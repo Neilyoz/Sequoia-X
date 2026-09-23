@@ -122,6 +122,11 @@ def test_info_fields_complete_and_configurable(tmp_path) -> None:
         "active_task_id",
         "db_path",
         "started_at",
+        # T7 §4.5 增补：鉴权模式、会话数与静态托管状态——排障时的第一现场信息。
+        # 这里是对外契约的白名单，加字段必须同步登记，否则前端按旧集合渲染会静默漏项。
+        "auth_mode",
+        "active_sessions",
+        "frontend_served",
     }
     assert body["version"] == "3.0.0"
     assert body["timezone"] == "Asia/Shanghai"

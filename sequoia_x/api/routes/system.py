@@ -1,18 +1,18 @@
 """系统信息路由：/health（免鉴权）+ /api/info + /api/strategies（鉴权）。
 
 拆成两个 router 是刻意的：health_router 不含鉴权依赖，供探针/负载均衡直连
-（架构 §4 鉴权列"否"）；其余接口整组挂在 require_api_key 上。
+（架构 §4 鉴权列"否"）；其余接口整组挂在 require_auth 上。
 """
 
 from fastapi import APIRouter, Depends, Request
 
-from sequoia_x.api.deps import require_api_key
+from sequoia_x.api.deps import require_auth
 from sequoia_x.api.schemas import HealthResponse, InfoResponse, StrategyInfo
 from sequoia_x.runner.registry import get_all_strategies
 
 health_router = APIRouter(tags=["system"])
 
-router = APIRouter(tags=["system"], dependencies=[Depends(require_api_key)])
+router = APIRouter(tags=["system"], dependencies=[Depends(require_auth)])
 
 
 @health_router.get("/health", response_model=HealthResponse)
@@ -44,6 +44,13 @@ def info(request: Request) -> dict[str, object]:
         "active_task_id": active.task_id if active else None,
         "db_path": settings.db_path,
         "started_at": request.app.state.started_at,
+        # T7 §4.5：这三项是"为什么打不开页面/为什么不用登录"的第一现场信息。
+        # auth_mode 只报 disabled/apikey 两态——apikey 模式下"要不要登录"对调用方
+        # 是同一个语义（要么 cookie 要么 X-API-Key），细分反而误导。
+        "auth_mode": "apikey" if settings.api_key else "disabled",
+        # active_sessions 是未过期会话数：进程重启即归零（会话表在内存里，03 §3）。
+        "active_sessions": len(request.app.state.sessions),
+        "frontend_served": request.app.state.frontend_served,
     }
 
 

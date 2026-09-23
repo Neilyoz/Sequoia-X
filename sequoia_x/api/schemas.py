@@ -71,12 +71,52 @@ class InfoResponse(BaseModel):
     active_task_id: str | None
     db_path: str
     started_at: str
+    # T7 §4.5 三字段：排查"为什么我打不开页面/为什么不用登录"的第一现场信息。
+    # auth_mode=disabled 即未配 API_KEY、全接口免鉴权；active_sessions 是未过期会话数，
+    # 进程重启即归零（会话表在内存，03 §3）；frontend_served=false 就是根路径 404 的原因。
+    auth_mode: str
+    active_sessions: int
+    frontend_served: bool
 
 
 class HealthResponse(BaseModel):
     """GET /health 的存活探针响应。"""
 
     status: str
+
+
+# ── T7 鉴权模型（03-frontend-and-auth.md §3）──
+
+
+class LoginRequest(BaseModel):
+    """POST /api/auth/login 的 body。
+
+    刻意用 JSON body 而非 OAuth2PasswordRequestForm（表单）：后者会拖进
+    python-multipart 这个新依赖，而本项目只有这一个凭据字段（03 §9）。
+    """
+
+    api_key: str = Field(
+        ...,
+        description=".env 里的 API_KEY。错了统一 401；未配 API_KEY（无鉴权模式）时该接口直接 400",
+    )
+
+
+class LoginResponse(BaseModel):
+    """登录成功回执。cookie 在 Set-Cookie 头里，body 不含 token（前端不需要也不该拿到）。"""
+
+    authenticated: bool
+    expires_in: int = Field(..., description="会话有效期（秒），等于 SESSION_TTL_SECONDS")
+
+
+class MeResponse(BaseModel):
+    """GET /api/auth/me 的响应。
+
+    mode 是前端路由的判据：open 直接跳过登录页（本地开发体验的关键），
+    session/apikey 表示已鉴权，只是凭据形态不同。
+    """
+
+    authenticated: bool
+    mode: str
 
 
 # ── T5 查询接口响应模型（架构 §4 接口全表）──
