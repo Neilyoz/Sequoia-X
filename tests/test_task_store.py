@@ -157,6 +157,20 @@ def test_query_signals_filters_and_paging(tmp_path) -> None:
     assert {r["symbol"] for r in page1 + page2} == {"000001", "600519", "300750"}
 
 
+def test_query_signals_date_range_closed_interval(tmp_path) -> None:
+    """start/end 闭区间过滤：端点内含、区间外排除，可与 strategy 组合（T8 日期选择器契约）。"""
+    store = _store(tmp_path)
+    for day in ("2026-09-19", "2026-09-20", "2026-09-21"):
+        store.save_signals(f"t-{day}", day, [StrategyOutcome("S", "turtle", ["600000"], False)])
+    rows = store.query_signals(start="2026-09-20", end="2026-09-21")
+    assert {r["trade_date"] for r in rows} == {"2026-09-20", "2026-09-21"}
+    assert store.query_signals(start="2026-09-22") == []
+    assert store.query_signals(end="2026-09-19") == [
+        r for r in store.query_signals() if r["trade_date"] == "2026-09-19"
+    ]
+    assert store.query_signals(start="2026-09-20", strategy="nope") == []
+
+
 def test_list_pagination_and_filters(tmp_path) -> None:
     store = _store(tmp_path)
     for i in range(1, 4):
@@ -174,16 +188,3 @@ def test_list_pagination_and_filters(tmp_path) -> None:
     assert total == 1 and records[0].task_id == "t3"
     page, total = store.list(limit=2, offset=2)
     assert total == 3 and len(page) == 1
-
-
-def test_append_log_tail_merges_into_result(tmp_path) -> None:
-    """log_tail 写进 result_json，与既有 result 键共存不互相覆盖。"""
-    store = _store(tmp_path)
-    rec = _record()
-    rec.result = {"synced_rows": 42}
-    store.create(rec)
-    store.append_log_tail("t1", ["line-1", "line-2"])
-    loaded = store.get("t1")
-    assert loaded.result == {"synced_rows": 42, "log_tail": ["line-1", "line-2"]}
-    store.append_log_tail("t1", ["only"])
-    assert store.get("t1").result["log_tail"] == ["only"]

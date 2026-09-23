@@ -215,12 +215,18 @@ class TaskStore:
         self,
         *,
         trade_date: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
         strategy: str | None = None,
         symbol: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """跨任务查选股结果（T5 的数据底座）。过滤条件全部参数化，防注入。"""
+        """跨任务查选股结果（T5 看板与 T8 前端日期区间选择器的数据底座）。
+
+        start/end 是 trade_date 的闭区间（含端点），与 trade_date 互斥使用由调用方保证；
+        过滤条件全部参数化，防注入。
+        """
         where: list[str] = []
         args: list[Any] = []
         for column, value in (
@@ -231,6 +237,12 @@ class TaskStore:
             if value is not None:
                 where.append(f"{column} = ?")
                 args.append(value)
+        if start is not None:
+            where.append("trade_date >= ?")
+            args.append(start)
+        if end is not None:
+            where.append("trade_date <= ?")
+            args.append(end)
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         with self._connect() as conn:
             rows = conn.execute(
@@ -239,25 +251,6 @@ class TaskStore:
                 [*args, limit, offset],
             ).fetchall()
         return [dict(r) for r in rows]
-
-    def append_log_tail(self, task_id: str, lines: list[str]) -> None:
-        """把日志行合并进 result_json 的 log_tail 字段。
-
-        截断不在这里做：行数上限由 TaskLogCapture 的 deque(maxlen) 在源头保证
-        （TASK_LOG_TAIL_LINES），store 只负责忠实落库。
-        """
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT result_json FROM task_run WHERE task_id = ?", (task_id,)
-            ).fetchone()
-            if row is None:
-                return
-            result = json.loads(row["result_json"]) if row["result_json"] else {}
-            result["log_tail"] = lines
-            conn.execute(
-                "UPDATE task_run SET result_json = ? WHERE task_id = ?",
-                (json.dumps(result, ensure_ascii=False), task_id),
-            )
 
     def prune(self, keep: int) -> None:
         """只保留最近 keep 条任务，信号级联清理。绝不触碰行情表（约束 §5）。"""
