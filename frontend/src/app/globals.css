@@ -1,0 +1,4 @@
+/* Tailwind CSS 4 的入口写法（官方形态：一行 @import，无 tailwind.config.js、
+   无 @tailwind 指令 —— 与任务书 §4.1 提到的旧版写法是本次最大的差异，详见前端 README）。
+   除此之外不写任何自定义 CSS（任务书 §4.6）：配色全部用 Tailwind 默认色板。 */
+@import "tailwindcss";

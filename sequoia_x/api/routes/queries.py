@@ -3,7 +3,7 @@
 本文件的纪律（约束 §5 / T5 §4.4）：
 - 全部语句都是 SELECT，且行情库/tasks.db 的自定义连接一律用 sqlite3 URI
   ``mode=ro`` 打开——即使代码写错也无法写入，双保险守住 456MB 真实行情库；
-- 不触达任何 sync_*/baostock/akshare 路径：查询接口必须廉价、可高频调
+- 不触达任何 sync_*/baostock 路径：查询接口必须廉价、可高频调
   （约束 §3 的并发代价决定了新鲜度靠跑批任务维护，而不是查询顺手补数据）；
 - signal 表在这里直接查而不复用 ``TaskStore.query_signals``：store 层没有
   task_id 过滤、没有 COUNT(total)、排序是 id DESC，三者都是 T5 §4.3 的硬要求，

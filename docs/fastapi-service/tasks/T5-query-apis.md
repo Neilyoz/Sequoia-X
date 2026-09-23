@@ -101,7 +101,7 @@ class OhlcvItem(BaseModel):
 
 ### 4.4 只读，绝对不触发同步
 
-- 这些路由**只读本地库**，不得有任何 baostock/akshare 调用。
+- 这些路由**只读本地库**，不得有任何 baostock 调用。
   理由：约束 §3（并发踩全局 socket）+ 查询接口必须是廉价、可高频调的。
 - 明确"数据新鲜度"：`GET /api/market/{symbol}/ohlcv` 响应里带
   `"note": "只读本地缓存，最新日期 {max_date}"`？ —— **不做**。

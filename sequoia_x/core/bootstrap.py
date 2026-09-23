@@ -24,7 +24,7 @@ def bootstrap() -> None:
         return
     # load_dotenv 找不到 .env 时静默返回，与改造前 main.py 的行为一致。
     load_dotenv()
-    # 全局兜底超时，主要给 akshare 用（它不接受 timeout 参数）。
+    # 全局兜底超时，给 baostock 的裸 socket 用。
     # 不能设太小：baostock 走裸 socket，会继承这个"单次 recv"超时，而它的全市场
     # 证券列表单次要 60~72 秒、分块间隔实测可达 4 秒，10 秒会把它掐死成"接口超时"。
     socket.setdefaulttimeout(60.0)

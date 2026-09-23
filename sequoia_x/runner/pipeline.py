@@ -11,7 +11,8 @@ from typing import Any
 
 from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
-from sequoia_x.data.engine import DataEngine
+from sequoia_x.data import baostock_breaker as bs_breaker
+from sequoia_x.data.engine import DataEngine, bs_reset_login_budget
 from sequoia_x.notify.feishu import FeishuNotifier
 from sequoia_x.runner.registry import resolve
 
@@ -55,18 +56,23 @@ def run_daily(
     *,
     push: bool = True,
     strategies: list[str] | None = None,
-    use_multiprocessing: bool = True,
 ) -> DailyReport:
     """日常跑批：同步今日快照 → 逐策略选股 → 有结果则推送飞书。
 
     strategies 为 None 表示注册表全部；push=False 只跑不推（API 调试用）。
-    use_multiprocessing 目前只透传不消费：DataEngine.sync_today_bulk() 尚无条件
-    使用 multiprocessing.Pool，服务态降级开关由 T2 实测 Pool 后接入（约束 §4），
-    届时在此处把开关传进 engine。
+    行情同步固定单进程单连接（见 DataEngine.sync_today_bulk）：baostock 的黑名单
+    按新建连接频率触发，并行 worker 的多路 anonymous 登录是主要风险源。
     """
     logger = get_logger(__name__)
+    # 登录预算按轮计：常驻服务进程里跑几十天后，累积值会先把本轮会话饿死。
+    bs_reset_login_budget()
     # 每次跑批自建 engine：其内部每个操作独立 connect，跨任务复用无收益反有脏连接风险。
     engine = DataEngine(settings)
+
+    # 名称走 baostock（唯一数据源，见 sync_stock_basic）。
+    # return_local_on_failure=False：日常不该把历史代码当当日清单，拿不到就空手过。
+    # 失败只记日志不抛，缺名称时飞书卡片退回显示雪球代码。
+    engine.sync_stock_basic(return_local_on_failure=False)
 
     logger.info("开始拉取最新快照...")
     count = engine.sync_today_bulk()
@@ -140,9 +146,38 @@ def run_backfill(settings: Settings) -> dict[str, Any]:
     回填的多轮重跑与重试细节留在 engine 层打日志，这里只汇报清单规模。
     """
     logger = get_logger(__name__)
+    bs_reset_login_budget()
     engine = DataEngine(settings)
     logger.info("进入回填模式...")
     all_symbols = engine.sync_stock_basic()
     engine.backfill(all_symbols)
     logger.info("Sequoia-X V2 回填模式运行完成")
     return {"symbols_synced": len(all_symbols)}
+
+
+def run_sync_names(settings: Settings) -> dict[str, Any]:
+    """只同步股票名称：唯一数据源 baostock。"""
+    logger = get_logger(__name__)
+    engine = DataEngine(settings)
+    codes = engine.sync_stock_basic(return_local_on_failure=False)
+    logger.info(f"股票名称同步完成，清单 {len(codes)} 只")
+    return {"names_synced": len(codes)}
+
+
+def run_reset_baostock() -> dict[str, Any]:
+    """清除 baostock 熔断状态。
+
+    服务端封禁是按源 IP 记的，换出口 IP（拨号重连、切网络、走代理）就绕开了；
+    不清状态的话新一轮跑批会被自己的冷却窗口挡在门外。
+    """
+    logger = get_logger(__name__)
+    previous = bs_breaker.load()
+    bs_breaker.reset()
+    if previous:
+        logger.info(
+            f"已清除 baostock 熔断状态（此前连续失败 {previous.get('failures')} 次，"
+            f"原因：{previous.get('reason', '未知')}）"
+        )
+    else:
+        logger.info("baostock 熔断状态为空，无需清除")
+    return {"cleared": bool(previous)}

@@ -6,7 +6,7 @@
 from sequoia_x.core.bootstrap import bootstrap
 
 # bootstrap() 必须先于一切 sequoia_x 业务子模块 import（约束 §1：.env 要先于
-# Settings 实例化、socket 超时要先于 baostock/akshare 建连；uvicorn 导入 app 的
+# Settings 实例化、socket 超时要先于 baostock 建连；uvicorn 导入 app 的
 # 路径与 CLI 完全不同，不收口就会出现"CLI 能跑、API 跑不了"的分裂故障）。
 # 下方 import 刻意位于语句之后，noqa: E402 标记这是有意的顺序（与 main.py 同手法），
 # 防止 ruff/编辑器把 import 块重排到 bootstrap() 之前。

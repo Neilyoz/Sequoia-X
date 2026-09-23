@@ -11,9 +11,16 @@ baostock 0.9.1 的 `util/socketutil.send_msg` 只以结尾的 `<![CDATA[]]>\\n` 
 
 这里改写 send_msg：把空返回当成死链立刻报错；解码失败则丢弃连接，
 由调用方（DataEngine）负责重连重试。
+
+另外补一个 `short_connect_timeout`：`SocketUtil.connect()` 新建 socket 时继承的是
+bootstrap 设的全局 60s 超时（那是给全市场列表的大响应留的），而登录握手只有
+毫秒级。IP 被服务端防火墙 DROP 时 connect 会一直等到 60s 才失败，是跑批卡死的
+主要来源；登录按调用收紧超时，出门即恢复。
 """
 
+import socket
 import zlib
+from contextlib import contextmanager
 
 import baostock.common.contants as cons
 import baostock.common.context as bs_context
@@ -24,7 +31,25 @@ from sequoia_x.core.logger import get_logger
 logger = get_logger(__name__)
 
 _TERMINATOR = b"<![CDATA[]]>\n"
+_LOGIN_TIMEOUT = 10.0
+_LOGIN_CONNECT_TIMEOUT = 8.0
 _installed = False
+
+
+@contextmanager
+def short_connect_timeout(seconds: float = _LOGIN_CONNECT_TIMEOUT):
+    """登录期间临时收紧全局 socket 超时，让 connect() 快速失败。
+
+    baostock 的 SocketUtil.connect() 不接受超时参数，只能靠
+    socket.setdefaulttimeout 影响它新建的 socket。收窄范围严格限定在登录这一次
+    调用内，退出时无论成败都恢复原值，避免波及后续依赖长超时的全市场查询。
+    """
+    previous = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(seconds)
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(previous)
 
 
 def current_socket():
@@ -57,7 +82,13 @@ def _send_msg(msg: str):
         logger.warning("baostock 未登录，请先调用 bs.login()")
         return None
 
+    # 登录握手正常在毫秒级返回；服务端限流时它会一直挂到超时。全局 60s 是给
+    # 全市场证券列表那种大响应留的，套在登录上会把一次重登拖成一分钟空等。
+    is_login = msg.split(cons.MESSAGE_SPLIT)[1] == cons.MESSAGE_TYPE_LOGIN_REQUEST
+    default_timeout = sock.gettimeout()
     try:
+        if is_login:
+            sock.settimeout(_LOGIN_TIMEOUT)
         sock.send(bytes(msg + "\n", encoding="utf-8"))
         receive = b""
         while True:
@@ -82,6 +113,12 @@ def _send_msg(msg: str):
         logger.warning(f"baostock 通信异常({type(exc).__name__}: {exc})，丢弃当前连接")
         drop_connection()
         return None
+    finally:
+        if is_login:
+            try:
+                sock.settimeout(default_timeout)
+            except OSError:  # 连接已被 drop_connection 关掉
+                pass
 
 
 def install() -> None:

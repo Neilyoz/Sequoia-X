@@ -3,10 +3,12 @@
 import sqlite3
 from pathlib import Path
 
+import baostock.common.contants as cons
 import pandas as pd
 
 from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
+from sequoia_x.data import baostock_breaker as bs_breaker
 from sequoia_x.data import baostock_guard as bs_guard
 
 logger = get_logger(__name__)
@@ -42,92 +44,199 @@ CREATE TABLE IF NOT EXISTS stock_basic (
 """
 
 
-def _bs_login(max_retries: int = 4) -> bool:
-    """登录 baostock，失败按 3/6/12s 退避重试，每次重试前先丢弃旧连接。
+# baostock 的反滥用盯的是"新建连接频率"，不是请求量：bs.login() 每次都会
+# SocketUtil.connect() 开一条新 TCP（见 baostock/login/loginout.py:63）。加固版把
+# 登录做成了 4 次退避重试 × 多个调用点（Pool(8) 每个 worker 一次、每 200 只预防性
+# 重连一次、每只股票会话恢复一次），一次跑批能打出上百条连接，正好踩中 10001011
+# 黑名单。原始版本每进程只登录一次，所以从不被封。
+# 这里按"每轮跑批"给登录数封顶：预算用完就判定服务端有问题、直接停手，而不是
+# 继续重连加重限流。预算在 pipeline 入口清零（常驻服务进程跨轮复用模块状态）。
+_LOGIN_BUDGET = 10
+_logins_used = 0
+_login_blocked = False  # 服务端明确拒绝（黑名单/权限）后，本进程不再碰 baostock
 
-    服务端会瞬时掐断长连接（表现为解码错或"网络接收错误"），一次失败不代表
-    不可用，所以登录本身必须重试 —— 否则整轮回填会被一次抖动直接终止。
-    但账号侧的拒绝（黑名单、登录数上限）重试无用，继续重连只会加重限流，直接放弃。
+# 重试无意义的账号级拒绝：继续冲击只会把限流坐实成黑名单
+_FATAL_LOGIN_CODES = frozenset({
+    cons.BSERR_BLACKLIST_USER,        # 10001011 黑名单用户
+    cons.BSERR_LOGIN_COUNT_LIMIT,     # 10001005 并发登录数超限
+    cons.BSERR_ACCESS_INSUFFICIENCE,  # 10001006 权限不足
+    cons.BSERR_CLIENT_VESION_EXPIRE,  # 10001004 客户端版本过期
+})
+
+
+def bs_reset_login_budget() -> None:
+    """开新一轮跑批：清零登录预算与进程内封禁判定。
+
+    刻意不动磁盘熔断（baostock_breaker）：预算回答"这一轮允许试几次"，熔断回答
+    "服务端刚刚是不是确实不可达"，两者语义不同。换出口 IP 后要立刻恢复连通，
+    走 `python main.py --reset-baostock`，不是这个函数。
     """
+    global _logins_used, _login_blocked
+    _logins_used = 0
+    _login_blocked = False
+
+
+def bs_login(max_retries: int = 2) -> bool:
+    """登录 baostock，占用的登录次数受本轮登录预算约束。
+
+    只做 2 次尝试、间隔 10s：一次登录失败通常是服务端限流的信号，按秒级退避
+    猛敲只会把它从限流升级成黑名单。致命错误（账号/IP 被拒）直接置
+    `_login_blocked`，本进程后续调用不再发起任何连接。
+
+    磁盘熔断先于预算判断：上一轮跑批已确认不可达时，这一轮连 socket 都不建。
+    登录的 connect 用短超时（见 bs_guard.short_connect_timeout）—— IP 被服务端
+    防火墙 DROP 时它本该立刻失败，而不是每次都等满全局 60s。
+    """
+    global _logins_used, _login_blocked
+
     import time
 
     import baostock as bs
-    import baostock.common.contants as cons
 
-    fatal = {
-        cons.BSERR_BLACKLIST_USER,
-        cons.BSERR_LOGIN_COUNT_LIMIT,
-        cons.BSERR_ACCESS_INSUFFICIENCE,
-        cons.BSERR_CLIENT_VESION_EXPIRE,
-    }
+    if _login_blocked:
+        return False
 
+    remaining = bs_breaker.cooldown_remaining()
+    if remaining > 0:
+        logger.warning(
+            f"baostock 熔断中（剩余 {remaining / 60:.0f} 分钟，上次原因："
+            f"{bs_breaker.load().get('reason', '未知')}），本轮不发起任何连接"
+        )
+        return False
+
+    if _logins_used >= _LOGIN_BUDGET:
+        logger.error(
+            f"baostock 登录次数已达本轮上限（{_LOGIN_BUDGET}），判定服务端持续不可用，"
+            "停止重连（继续冲击会触发黑名单）。已入库数据可续传，请稍后重跑"
+        )
+        return False
+
+    reason = "登录失败"
     for attempt in range(max_retries):
-        bs_guard.drop_connection()
+        if bs_guard.current_socket() is not None:
+            # 登录被服务端拒绝时库不会关掉那条 socket，不先关就每试一次漏一个 fd
+            bs_guard.drop_connection()
+        _logins_used += 1
+        network_down = False
         try:
-            lg = bs.login()
+            with bs_guard.short_connect_timeout():
+                lg = bs.login()
         except Exception as exc:
             reason = str(exc)
+            network_down = isinstance(exc, OSError)
         else:
             if lg.error_code == "0":
+                bs_breaker.record_success()
                 return True
-            reason = lg.error_msg
-            if lg.error_code in fatal:
+            reason = f"{lg.error_code}: {lg.error_msg}"
+            if lg.error_code in _FATAL_LOGIN_CODES:
+                _login_blocked = True
+                bs_breaker.record_failure(reason)
                 logger.error(
-                    f"baostock 拒绝登录({lg.error_code}: {reason})，"
-                    "这是服务端对本 IP/anonymous 账号的限流，重试只会加重，终止本轮"
+                    f"baostock 拒绝登录({reason})，这是服务端对本 IP/anonymous 账号的限流，"
+                    "重试只会加重，本进程后续不再连接"
                 )
                 return False
+            # 网络接收错误 = 包根本没送到服务端（IP 被防火墙 DROP 就是这个形态）
+            network_down = lg.error_code == cons.BSERR_RECVSOCK_FAIL
 
         logger.warning(f"baostock 登录失败({attempt + 1}/{max_retries}): {reason}")
+        if network_down:
+            # 重试只是再白等一个短超时，服务端连请求都没收到
+            logger.warning("baostock 网络层不可达，服务端未收到请求，不再重试")
+            break
         if attempt < max_retries - 1:
-            time.sleep(3 * 2 ** attempt)
+            time.sleep(10)
+
+    # 尝试都没能登录：写盘冷却，下一轮跑批直接回退本地数据
+    bs_breaker.record_failure(reason)
     return False
 
 
-def _bs_query_k(bs_code: str, start: str, end: str):
-    """查询单只股票日 K；会话被服务端作废时静默重登后立刻重试一次。
-
-    anonymous 会话会被 baostock 服务端提前作废，表现为 socket 还活着、
-    响应却是 10001001 用户未登陆。这不是网络故障，重登即可恢复，
-    不该占用退避重试的次数、也不该打 warning。
-    每只股票最多重登一次：`bs.login()` 每次都新建一条 TCP 连接，
-    密集重连是 baostock 反滥用（10001011 黑名单）的触发条件。
-    """
+def bs_logout() -> None:
+    """登出并释放连接；失败只记日志，不影响主流程。"""
     import baostock as bs
-    import baostock.common.contants as cons
 
-    def query():
-        return bs.query_history_k_data_plus(
-            bs_code,
-            "date,open,high,low,close,volume,amount",
+    if bs_guard.current_socket() is None:
+        return
+    try:
+        bs.logout()
+    except Exception as exc:
+        logger.warning(f"baostock 登出异常：{exc}")
+    finally:
+        bs_guard.drop_connection()
+
+
+class BaostockSession:
+    """一条 baostock 连接上的查询，会话失效或连接断开时自愈一次。
+
+    自愈走 `bs_login(max_retries=1)`，受本轮登录预算约束，因此整轮跑批新增的连接数
+    只有个位数上界；恢复仍失败时把原始错误返回给调用方，由熔断逻辑收尾。
+
+    需要兜住的两种失败：
+    - 10001001 用户未登陆：socket 还活着，但服务端已作废物化会话；
+    - 10002007 网络接收错误：连接已被 baostock_guard 丢弃，后续请求只会立刻失败。
+    """
+
+    _RECOVERABLE = (cons.BSERR_NO_LOGIN, cons.BSERR_RECVSOCK_FAIL)
+
+    def __init__(self) -> None:
+        self.usable = False
+
+    def __enter__(self) -> "BaostockSession":
+        self.usable = bs_login()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if self.usable:
+            bs_logout()
+        return False
+
+    def call(self, func_name: str, **kwargs):
+        """按名字调用 baostock 查询接口（需要已登录的会话）。"""
+        import baostock as bs
+
+        func = getattr(bs, func_name)
+        rs = func(**kwargs)
+        if rs.error_code in self._RECOVERABLE and bs_login(max_retries=1):
+            rs = func(**kwargs)
+        return rs
+
+    def query_k(self, bs_code: str, start: str, end: str):
+        """单只股票日 K（后复权）。"""
+        return self.call(
+            "query_history_k_data_plus",
+            code=bs_code,
+            fields="date,open,high,low,close,volume,amount",
             start_date=start,
             end_date=end,
             frequency="d",
-            adjustflag="1",  # 后复权
+            adjustflag="1",
         )
 
-    rs = query()
-    if rs.error_code != cons.BSERR_NO_LOGIN:
-        return rs
-    return query() if _bs_login(max_retries=1) else rs
+    def last_trade_day(self, start: str, end: str) -> str | None:
+        """返回 [start, end] 内最后一个交易日，一次查询替代逐只试探。
 
-
-def _bs_fetch_batch(tasks: list) -> list:
-    """多进程 worker：独立 login，批量拉取 baostock 数据。"""
-    import baostock as bs
-
-    if not _bs_login():
-        logger.error("worker 无法登录 baostock，本批次跳过")
-        return []
-    results = []
-    for symbol, bs_code, start, end in tasks:
-        rs = _bs_query_k(bs_code, start, end)
+        三种结果：
+        - 正常：区间内的最大交易日；
+        - None：区间内没有交易日（休市），调用方应跳过本轮而不是空跑几千次查询；
+        - 查询失败：按 `end` 返回，宁可多跑也不因日历抖动漏数据。
+        """
+        try:
+            rs = self.call("query_trade_dates", start_date=start, end_date=end)
+        except Exception as exc:
+            logger.warning(f"交易日历查询异常：{exc}，按 {end} 处理")
+            return end
         if rs.error_code != "0":
-            continue
+            logger.warning(f"交易日历查询失败({rs.error_msg})，按 {end} 处理")
+            return end
+
+        days: list[str] = []
         while rs.next():
-            results.append([symbol] + rs.get_row_data())
-    bs.logout()
-    return results
+            row = rs.get_row_data()  # [calendar_date, is_trading_day]
+            if row[1] == "1":
+                days.append(row[0])
+        return max(days) if days else None
 
 
 class DataEngine:
@@ -200,9 +309,13 @@ class DataEngine:
     # ── 数据同步 ──
 
     def sync_today_bulk(self) -> int:
-        """多进程并行通过 baostock 拉取增量数据（后复权），写入 SQLite。"""
+        """单进程串行通过 baostock 拉取增量数据（后复权），写入 SQLite。
+
+        原先用 Pool(8) 并行：8 个 worker 各自 login，等于同时对 anonymous 账号开
+        8 条连接，正是 `10001005 登录数达到上限` 惩罚的形态。改成串行只占一条
+        连接，慢一些换来的是整轮跑批的登录数固定为 1。
+        """
         from datetime import date, timedelta
-        from multiprocessing import Pool
 
         today_str = date.today().strftime("%Y-%m-%d")
 
@@ -228,20 +341,34 @@ class DataEngine:
             logger.info("所有股票已是最新，无需更新")
             return 0
 
-        logger.info(f"需要更新 {len(tasks)} 只股票，启动多进程并行拉取...")
+        all_rows: list[list] = []
+        with BaostockSession() as session:
+            if not session.usable:
+                # baostock 不可用（限流/黑名单/网络层被封）：没有兜底数据源，本轮不产增量。
+                # 数据源已收敛为 baostock 单源，宁可空跑也不写入异源口径的脏数据。
+                logger.error("baostock 不可用，本轮无增量（已无 akshare 兜底）")
+                return 0
 
-        n_workers = min(8, len(tasks))
-        chunks = [tasks[i::n_workers] for i in range(n_workers)]
+            # 一次日历查询定目标日：休市日直接跳过，省掉 5200 次必然为空的逐只查询
+            target = session.last_trade_day(min(t[2] for t in tasks), today_str)
+            if target is None:
+                logger.info(f"{today_str} 前无待补交易日（休市），跳过增量同步")
+                return 0
+            tasks = [(s, c, st, target) for s, c, st, _ in tasks if st <= target]
+            if not tasks:
+                logger.info(f"所有股票已更新至 {target}，无需更新")
+                return 0
 
-        with Pool(n_workers) as pool:
-            batch_results = pool.map(_bs_fetch_batch, chunks)
-
-        all_rows = []
-        for batch in batch_results:
-            all_rows.extend(batch)
+            logger.info(f"需要更新 {len(tasks)} 只股票到 {target}，单进程串行拉取（1 条连接）...")
+            for symbol, bs_code, start, end in tasks:
+                rs = session.query_k(bs_code, start, end)
+                if rs.error_code != "0":
+                    continue
+                while rs.next():
+                    all_rows.append([symbol] + rs.get_row_data())
 
         if not all_rows:
-            logger.info("无新数据（可能非交易日）")
+            logger.info("无新数据（可能无成交）")
             return 0
 
         df = pd.DataFrame(
@@ -268,38 +395,39 @@ class DataEngine:
     def backfill(self, symbols: list[str]) -> None:
         """通过 baostock 批量回填历史日 K 线数据（后复权）。
 
-        容错机制：
-        - 登录失败按 3/6/12s 退避重试（服务端会瞬时掐断连接）
-        - 会话被服务端作废（用户未登陆）时静默重登，不占用下面的重试次数
-        - 单只股票失败自动重试 3 次，间隔递增（2s/4s/8s）
-        - 每 200 只股票自动重连 baostock（防止长连接超时）
+        容错机制（全程只占 1 条连接）：
+        - 登录最多 2 次尝试、间隔 10s，且受本轮登录预算约束
+        - 会话失效或连接已断时由 BaostockSession 静默重登，不占用下面的重试次数
+        - 单只股票失败重试 2 次，间隔 5s（不再自己重连，避免连接数叠加）
         - 连续 10 只失败即停止（服务端限流/黑名单时继续重连只会加重）
         - 已入库的自动 skip，中断后可重跑续传
         """
         import time
         from datetime import date, timedelta
 
-        import baostock as bs
-
         today_str = date.today().strftime("%Y-%m-%d")
-        max_retries = 3
-        reconnect_interval = 200  # 每处理 N 只股票重连一次
-
-        if not _bs_login():
-            logger.error("baostock 连续登录失败，回填终止")
-            return
+        max_retries = 2
+        retry_wait = 5
 
         success = 0
         skipped = 0
         failed = 0
-        since_reconnect = 0
         consecutive_failed = 0
         max_consecutive_failed = 10  # 连续 N 只失败即判定被限流，停止而不是继续冲击
 
-        try:
+        with BaostockSession() as session:
+            if not session.usable:
+                logger.error("baostock 无法登录，回填终止")
+                return
+
+            # 终点钳到最近交易日（一次日历查询），休市日不必为每个代码都跑一次
+            # 注定为空的尾巴；日历不可信时退回今天。
+            window_start = (date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+            target_str = session.last_trade_day(window_start, today_str) or today_str
+
             for i, symbol in enumerate(symbols):
                 last_date = self._get_last_date(symbol)
-                if last_date and last_date >= today_str:
+                if last_date and last_date >= target_str:
                     skipped += 1
                     if (i + 1) % 500 == 0:
                         logger.info(
@@ -307,16 +435,6 @@ class DataEngine:
                             f"成功 {success} 跳过 {skipped} 失败 {failed}"
                         )
                     continue
-
-                # 定期重连，防止长连接超时
-                since_reconnect += 1
-                if since_reconnect >= reconnect_interval:
-                    bs_guard.drop_connection()
-                    time.sleep(1)
-                    if not _bs_login():
-                        logger.error("重连失败，终止回填")
-                        return
-                    since_reconnect = 0
 
                 start = last_date or self.start_date
                 if last_date:
@@ -329,7 +447,7 @@ class DataEngine:
                 query_ok = False
                 for attempt in range(max_retries):
                     try:
-                        rs = _bs_query_k(bs_code, start, today_str)
+                        rs = session.query_k(bs_code, start, target_str)
 
                         if rs.error_code != "0":
                             raise RuntimeError(rs.error_msg)
@@ -344,17 +462,10 @@ class DataEngine:
                         if attempt == max_retries - 1:
                             logger.warning(f"[{symbol}] {max_retries}次重试均失败: {exc}，跳过")
                             break
-                        wait = 2 ** (attempt + 1)
                         logger.warning(
-                            f"[{symbol}] 第{attempt + 1}次失败: {exc}，{wait}s 后重试"
+                            f"[{symbol}] 第{attempt + 1}次失败: {exc}，{retry_wait}s 后重试"
                         )
-                        time.sleep(wait)
-                        # 丢弃被污染的连接后重登（不能在被污染的连接上 logout）
-                        bs_guard.drop_connection()
-                        time.sleep(1)
-                        if not _bs_login():
-                            logger.error(f"[{symbol}] 重登失败，放弃本只")
-                            break
+                        time.sleep(retry_wait)
 
                 if not query_ok:
                     failed += 1
@@ -404,61 +515,83 @@ class DataEngine:
                         f"成功 {success} 跳过 {skipped} 失败 {failed}"
                     )
 
-        finally:
-            bs.logout()
-
         logger.info(f"回填完成 — 成功: {success} | 跳过: {skipped} | 失败: {failed}")
 
     # ── 股票列表与名称 ──
 
-    def sync_stock_basic(self) -> list[str]:
-        """拉取全市场 A 股代码与名称，写入 stock_basic 表并返回代码列表。
+    def _fetch_basic_from_baostock(self) -> list[tuple[str, str]] | None:
+        """从 baostock 取全市场「上市股票」的 (代码, 名称)；不可用或失败返回 None。
 
         该接口单次返回约 52 万字节，实测耗时 60~72 秒，是全流程最脆弱的一步。
-        失败时重登重试；仍失败则回退到本地已入库代码，避免回填在第一
-        步就被一次网络抖动直接终止。
+        只尝试 2 次（每次登录仍受本轮登录预算约束）：这一步失败不值得用重连去换。
         """
         import time
 
-        import baostock as bs
-
-        max_attempts = 3
+        max_attempts = 2
         for attempt in range(max_attempts):
-            if not _bs_login():
-                logger.warning(f"同步股票列表失败（第{attempt + 1}/{max_attempts}次）：无法登录")
-                continue
-            try:
-                rs = bs.query_stock_basic(code_name="", code="")
-                if rs.error_code != "0":
-                    raise RuntimeError(rs.error_msg)
+            with BaostockSession() as session:
+                if not session.usable:
+                    logger.warning(f"同步股票列表失败（第{attempt + 1}/{max_attempts}次）：无法登录")
+                    continue
+                try:
+                    rs = session.call("query_stock_basic", code_name="", code="")
+                    if rs.error_code != "0":
+                        raise RuntimeError(rs.error_msg)
 
-                items: list[tuple[str, str]] = []
-                while rs.next():
-                    row = rs.get_row_data()
-                    code = row[0]           # "sh.600000" or "sz.000001"
-                    name = row[1]           # code_name
-                    status = row[4]         # "1" = 上市
-                    stock_type = row[5]     # "1" = 股票
-                    if status == "1" and stock_type == "1":
-                        items.append((code.split(".")[1], name))  # 提取纯数字代码
-                if not items:
-                    raise RuntimeError("返回结果为空")
+                    items: list[tuple[str, str]] = []
+                    while rs.next():
+                        row = rs.get_row_data()
+                        code = row[0]           # "sh.600000" or "sz.000001"
+                        name = row[1]           # code_name
+                        status = row[4]         # "1" = 上市
+                        stock_type = row[5]     # "1" = 股票
+                        if status == "1" and stock_type == "1":
+                            items.append((code.split(".")[1], name))  # 提取纯数字代码
+                    if not items:
+                        raise RuntimeError("返回结果为空")
+                    return items
+                except Exception as exc:
+                    logger.warning(f"同步股票列表异常（第{attempt + 1}/{max_attempts}次）: {exc}")
+                    time.sleep(3 * 2 ** attempt)
+        return None
 
-                saved = self._save_stock_basic(items)
-                logger.info(f"股票列表同步完成，共 {len(items)} 只，写入名称 {saved} 条")
-                bs.logout()
-                return [code for code, _ in items]
-            except Exception as exc:
-                logger.warning(f"同步股票列表异常（第{attempt + 1}/{max_attempts}次）: {exc}")
-                bs_guard.drop_connection()
-                time.sleep(3 * 2 ** attempt)
+    def sync_stock_basic(self, *, return_local_on_failure: bool = True) -> list[str]:
+        """刷新 stock_basic（代码 + 名称），返回可用于回填的代码清单。
+
+        唯一数据源是 baostock（`query_stock_basic` 一次同时返回代码与名称）。不可用时
+        可选回退本地已入库代码（`return_local_on_failure=False` 时不做，用于日常链路
+        ——它不该把历史代码当成当日清单）。
+        """
+        items = self._fetch_basic_from_baostock()
+        if items is not None:
+            saved = self._save_stock_basic(items)
+            logger.info(f"股票列表同步完成，共 {len(items)} 只，写入名称 {saved} 条")
+            return [code for code, _ in items]
+
+        if not return_local_on_failure:
+            logger.error("baostock 不可用，本轮未刷新股票列表")
+            return []
 
         local = self.get_local_symbols()
         if local:
-            logger.warning(f"远端股票列表不可用，回退到本地已入库代码 {len(local)} 只")
+            logger.warning(f"baostock 不可用，回退到本地已入库代码 {len(local)} 只")
             return local
-        logger.error("无法获取股票列表：远端拉取失败且本地无历史数据")
+        logger.error("无法获取股票列表：baostock 拉取失败且本地无历史数据")
         return []
+
+    def sync_stock_names(self) -> tuple[int, list[str]]:
+        """同步全市场股票名称到 stock_basic，返回 (写入条数, 代码列表)。
+
+        与 `sync_stock_basic` 同源（baostock query_stock_basic），保留该方法名是为了
+        兼容既有调用点。baostock 不可用时返回 (0, [])——不再有 akshare 兜底。
+        """
+        items = self._fetch_basic_from_baostock()
+        if items is None:
+            logger.warning("baostock 不可用，股票名称同步跳过")
+            return 0, []
+        saved = self._save_stock_basic(items)
+        logger.info(f"股票名称同步完成，共 {len(items)} 只，写入 {saved} 条")
+        return saved, [code for code, name in items if name]
 
     def _save_stock_basic(self, items: list[tuple[str, str]]) -> int:
         """写入/覆盖 (symbol, name)，名称会变（如 ST 更名）所以每次同步都刷新。"""

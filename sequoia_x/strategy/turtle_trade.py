@@ -3,6 +3,7 @@
 import pandas as pd
 
 from sequoia_x.core.logger import get_logger
+from sequoia_x.data.engine import BaostockSession
 from sequoia_x.strategy.base import BaseStrategy
 
 logger = get_logger(__name__)
@@ -29,21 +30,25 @@ class TurtleTradeStrategy(BaseStrategy):
 
         流通股本 = 成交量 / (换手率% / 100)
         流通市值 = 流通股本 × 不复权收盘价
+
+        登录走 engine 的会话入口：裸调 bs.login() 会在当日已经用过 baostock 的
+        进程里再加一条连接，而 baostock 的黑名单正是按新建连接频率触发的。
         """
         from datetime import date
-
-        import baostock as bs
 
         today_str = date.today().strftime("%Y-%m-%d")
         market_caps: dict[str, float] = {}
 
-        bs.login()
-        try:
+        with BaostockSession() as session:
+            if not session.usable:
+                logger.warning("baostock 不可用，流通市值排序退回候选原序")
+                return market_caps
+
             for symbol in symbols:
-                bs_code = self.engine._to_baostock_code(symbol)
-                rs = bs.query_history_k_data_plus(
-                    bs_code,
-                    "close,volume,turn",
+                rs = session.call(
+                    "query_history_k_data_plus",
+                    code=self.engine._to_baostock_code(symbol),
+                    fields="close,volume,turn",
                     start_date=today_str,
                     end_date=today_str,
                     frequency="d",
@@ -60,8 +65,6 @@ class TurtleTradeStrategy(BaseStrategy):
                             market_caps[symbol] = circulating_shares * close
                     except (ValueError, ZeroDivisionError):
                         continue
-        finally:
-            bs.logout()
 
         return market_caps
 

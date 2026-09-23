@@ -42,8 +42,8 @@ from sequoia_x.core.config import get_settings   # ③ 之后才 import 业务�
    但**任何模块顶层不得调用 `get_settings()`**。
 2. **`socket.setdefaulttimeout(60.0)` 不得下调。** 原文注释：baostock 走裸 socket 并继承该
    "单次 recv"超时，其全市场证券列表单次耗时 60~72 秒、分块间隔实测可达 4 秒。
-   设成 10s 会把它掐死成"接口超时"。新增的 akshare 依赖（`PrivatePlacementStrategy`）
-   不接受 `timeout` 参数，同样靠这个全局兜底。
+   设成 10s 会把它掐死成"接口超时"。（登录 connect 期的短超时是例外，由
+   `bs_guard.short_connect_timeout()` 局部收窄，不覆盖这条全局约定。）
 3. 以上两条统一收口到 **`sequoia_x/core/bootstrap.py:bootstrap()`**，CLI 入口与 API 入口
    **都必须最先调用它**，且不得在 `bootstrap()` 之前 import 任何 `sequoia_x.*` 业务子模块。
    `bootstrap()` 必须是幂等的（重复调用无副作用）。
@@ -79,7 +79,7 @@ from sequoia_x.core.config import get_settings   # ③ 之后才 import 业务�
   A 的 `drop_connection()` 会掐断 B 正在用的 socket，表现为 B 随机"接口超时"，
   连续失败后触发服务端限流 `10001011`（该限流会对本机 IP 持续一段时间，
   届时**连验证都不能做，只能用极小样本**）。
-- `akshare` 同理不宜并发轰炸东方财富接口。
+- 数据源已收敛为 baostock 单源，`akshare` 依赖整体移除，不再有并发轰炸东财的问题。
 
 强制要求：
 
@@ -89,7 +89,7 @@ from sequoia_x.core.config import get_settings   # ③ 之后才 import 业务�
    **不要排队**。排队会让用户重复点击堆积出一串注定失败的跑批。
 3. CLI 与调度器共用同一个 `TaskManager`（服务态）或同一个 pipeline（进程态），
    不得出现"绕过单飞"的第二条提交路径。
-4. 任何新增路由若会触达 `DataEngine` 的 baostock/akshare 方法
+4. 任何新增路由若会触达 `DataEngine` 的 baostock 方法
    （`sync_today_bulk` / `backfill` / `sync_stock_basic`），必须走 `TaskManager`。
    只读查询（`get_ohlcv` / `get_stock_names` / `get_local_symbols`）可以直连，见 §5。
 
@@ -196,7 +196,7 @@ from sequoia_x.core.config import get_settings   # ③ 之后才 import 业务�
   现有属性测试有编号约定（如"Property 13"），新增性质请续号，
   并在 docstring 里与本文档 §编号互相指认。
 - 每个任务的验收标准里都写了"必须新增哪些测试"。**没有测试的实现视为未完成。**
-- 全量测试必须能在**离线**环境通过（不访问 baostock/akshare/飞书）。
+- 全量测试必须能在**离线**环境通过（不访问 baostock/飞书）。
   跑批类测试一律 mock `DataEngine` 与 `FeishuNotifier`。
 
 ---

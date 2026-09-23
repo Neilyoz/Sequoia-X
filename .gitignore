@@ -18,6 +18,11 @@ ENV/
 
 # 数据库文件
 data/*.db
+# 手工备份（如清理前留的安全副本）：带时间戳后缀，不被 data/*.db 覆盖
+data/*.db.bak*
+
+# baostock 熔断状态：随出口 IP 与网络环境变化，属于本机运行态，不入库
+data/baostock_breaker.json
 
 # 环境变量
 .env
@@ -36,3 +41,14 @@ build/
 
 # Hypothesis 测试缓存
 .hypothesis/
+
+# 前端（T8）：依赖目录与构建产物一律不入库。
+# frontend/out/ 是 Next.js 静态导出产物，由 scripts/build_frontend.(sh|ps1) 现做，
+# 进 git 就是长期腐化源（03 §7）；frontend/.gitignore 另有同样一份，这里是双保险，
+# 因为部署脚本与同事习惯都可能在仓库根目录执行 git 命令。
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# WorkBuddy 工作记忆：本机运行态日志与上下文，跨会话仅供本机使用，不入库
+.workbuddy/

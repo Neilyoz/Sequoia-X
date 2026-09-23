@@ -1,8 +1,10 @@
 """Sequoia-X V2 主程序入口（CLI）。
 
-两种运行模式：
-  python main.py               # 日常模式：8进程增量补数据 + 跑策略 + 飞书推送（2~3分钟）
-  python main.py --backfill    # 回填模式：baostock 拉全市场历史K线（首次/补数据用，约12分钟）
+运行模式：
+  python main.py                  # 日常模式：单进程串行增量补数据 + 跑策略 + 飞书推送
+  python main.py --backfill       # 回填模式：baostock 拉全市场历史K线（首次/补数据用，约12分钟）
+  python main.py --names          # 只同步股票名称（数据源：baostock）
+  python main.py --reset-baostock # 清除 baostock 熔断状态（换出口 IP 后用，立刻恢复连通）
 服务化入口见 sequoia_x/api/app.py，两者共用 sequoia_x/runner 编排层。
 """
 
@@ -29,6 +31,16 @@ def main() -> None:
         action="store_true",
         help="回填模式：通过 baostock 拉取全市场历史 K 线（约12分钟）",
     )
+    parser.add_argument(
+        "--names",
+        action="store_true",
+        help="只同步股票名称（数据源：baostock）后退出",
+    )
+    parser.add_argument(
+        "--reset-baostock",
+        action="store_true",
+        help="清除 baostock 熔断状态（换出口 IP 后用，立刻恢复连通）",
+    )
     args = parser.parse_args()
 
     # 显式初始化：收尾日志若因控制流变动移出 try，未定义引用会直接炸。
@@ -37,6 +49,14 @@ def main() -> None:
         settings = get_settings()
         logger = get_logger(__name__)
         logger.info("Sequoia-X V2 启动")
+
+        if args.reset_baostock:
+            pipeline.run_reset_baostock()
+            return
+
+        if args.names:
+            pipeline.run_sync_names(settings)
+            return
 
         if args.backfill:
             pipeline.run_backfill(settings)

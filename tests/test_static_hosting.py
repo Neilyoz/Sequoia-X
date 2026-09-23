@@ -7,7 +7,6 @@
 所以每个 API 路径都要断言"返回的不是 index.html"。
 """
 
-import json
 import logging
 from pathlib import Path
 
@@ -223,14 +222,7 @@ def test_static_files_do_not_require_auth(tmp_path) -> None:
         assert client.get("/").status_code == 200
 
 
-def test_default_settings_do_not_mount_repo_frontend(tmp_path) -> None:
-    """守住的性质：默认 frontend/out 不存在时降级为只提供 API（T8 之前仓库里没有 frontend/）。
-
-    同时验证仓库根确实还没被建出 frontend/ —— 本任务的红线之一。
-    """
-    repo_root = Path(__file__).resolve().parent.parent
-    assert not (repo_root / "frontend").exists(), "T7 不得创建 frontend/ 目录（那是 T8 的活）"
-    client = build(tmp_path, frontend_dist_path=str(repo_root / "frontend" / "out"))
-    with client:
-        assert client.get("/").status_code == 404
-        assert json.loads(client.get("/health").content) == {"status": "ok"}
+# 原用例 test_default_settings_do_not_mount_repo_frontend（T7 写的"仓库根还没有
+# frontend/，那是 T8 的活"绊线）已在 T8 交付后退役：frontend/ 存在是事实，
+# "dist 不存在 → 降级只提供 API"这条性质由上方的
+# test_missing_dist_degrades_to_api_only 完整覆盖，不再重复。

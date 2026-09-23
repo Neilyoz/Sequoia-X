@@ -3,7 +3,6 @@ name = "sequoia-x"
 version = "3.0.0"  # 2.x 仅 CLI，3.0 起为常驻 HTTP 服务：形态变更，算 major（T3 §4.2）
 requires-python = ">=3.10"
 dependencies = [
-    "akshare>=1.10",
     "baostock>=0.9",
     "fastapi>=0.115",
     "pydantic-settings>=2.0",

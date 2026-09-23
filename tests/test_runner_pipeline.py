@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from sequoia_x.core.config import Settings
 from sequoia_x.runner import pipeline
@@ -158,6 +158,31 @@ def test_run_daily_skips_strategies_when_no_new_data(tmp_path: Path) -> None:
     assert report.outcomes == []
     assert report.total_signals == 0
     assert report.push_enabled is True
+
+
+def test_run_daily_syncs_names_before_snapshot(tmp_path: Path) -> None:
+    """日常跑批开头先刷股票名称（数据源 baostock），再拉快照。"""
+    settings = _settings(tmp_path)
+    engine = MagicMock()
+    engine.sync_today_bulk.return_value = 0
+    with patch.object(pipeline, "DataEngine", MagicMock(return_value=engine)):
+        pipeline.run_daily(settings)
+    assert engine.mock_calls[:2] == [
+        # 日常链路不能把历史代码当当日清单，故显式关掉本地回退
+        call.sync_stock_basic(return_local_on_failure=False),
+        call.sync_today_bulk(),
+    ]
+
+
+def test_run_sync_names_uses_baostock(tmp_path: Path) -> None:
+    """--names 也走 baostock 单源链，返回清单规模。"""
+    settings = _settings(tmp_path)
+    engine = MagicMock()
+    engine.sync_stock_basic.return_value = ["600000", "000001", "300750"]
+    with patch.object(pipeline, "DataEngine", MagicMock(return_value=engine)):
+        result = pipeline.run_sync_names(settings)
+    engine.sync_stock_basic.assert_called_once_with(return_local_on_failure=False)
+    assert result == {"names_synced": 3}
 
 
 def test_run_backfill_syncs_basic_then_backfills(tmp_path: Path) -> None:
