@@ -1,11 +1,13 @@
 """策略引擎属性测试。"""
 
+import gc
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
-from hypothesis import given, settings as h_settings
+from hypothesis import given
+from hypothesis import settings as h_settings
 from hypothesis import strategies as st
 
 from sequoia_x.core.config import Settings
@@ -31,10 +33,14 @@ def test_strategy_run_returns_list_of_str(symbols: list[str]) -> None:
         )
         engine = DataEngine(settings)
 
-        with patch.object(engine, "get_all_symbols", return_value=symbols):
+        with patch.object(engine, "get_local_symbols", return_value=symbols):
             with patch.object(engine, "get_ohlcv", return_value=pd.DataFrame()):
                 strategy = MaVolumeStrategy(engine=engine, settings=settings)
                 result = strategy.run()
+
+        # 3.14 的 sqlite3 连接靠 GC 兜底关闭：DataEngine._init_db 留下的 test.db
+        # 句柄不回收的话，Windows 下 TemporaryDirectory 清理会抛 PermissionError。
+        gc.collect()
 
     assert isinstance(result, list)
     assert all(isinstance(s, str) and len(s) > 0 for s in result)

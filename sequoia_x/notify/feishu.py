@@ -7,6 +7,7 @@ import requests
 
 from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
+from sequoia_x.data.engine import DataEngine
 
 logger = get_logger(__name__)
 
@@ -17,16 +18,21 @@ class FeishuNotifier:
     根据策略的 webhook_key 路由到对应的飞书机器人。
     若 webhook_key 未在 Settings.strategy_webhooks 中配置，
     则 fallback 到 Settings.feishu_webhook_url。
+
+    股票名称直接读本地 stock_basic 表（由 --backfill 的 sync_stock_basic 维护），
+    不再在推送时临时请求 baostock。
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, engine: DataEngine | None = None) -> None:
         """
         初始化 FeishuNotifier。
 
         Args:
             settings: Settings 实例，提供 Webhook URL 配置。
+            engine: DataEngine 实例，提供本地股票名称；为 None 时卡片只显示雪球代码。
         """
         self.settings = settings
+        self.engine = engine
 
     @staticmethod
     def _to_xueqiu_code(code: str) -> str:
@@ -37,24 +43,9 @@ class FeishuNotifier:
             return f"BJ{code}"
         return f"SZ{code}"
 
-    @staticmethod
-    def _get_stock_names(symbols: list[str]) -> dict[str, str]:
-        """通过 baostock 批量查询股票名称，返回 {code: name} 映射。"""
-        import baostock as bs
-        bs.login()
-        mapping = {}
-        for code in symbols:
-            prefix = "sh" if code.startswith(("6", "9")) else "sz"
-            rs = bs.query_stock_basic(code=f"{prefix}.{code}")
-            while rs.next():
-                row = rs.get_row_data()
-                mapping[code] = row[1]  # 第2个字段是股票名称
-        bs.logout()
-        return mapping
-
     def _build_card(self, symbols: list[str], strategy_name: str) -> dict:
         today = date.today().strftime("%Y-%m-%d")
-        names = self._get_stock_names(symbols)
+        names = self.engine.get_stock_names(symbols) if self.engine else {}
 
         links: list[str] = []
         for code in symbols:
@@ -79,7 +70,10 @@ class FeishuNotifier:
                         "tag": "div",
                         "text": {
                             "tag": "lark_md",
-                            "content": f"**日期：** {today}\n**策略：** {strategy_name}\n**选股数量：** {len(symbols)}",
+                            "content": (
+                                f"**日期：** {today}\n**策略：** {strategy_name}"
+                                f"\n**选股数量：** {len(symbols)}"
+                            ),
                         },
                     },
                     {"tag": "hr"},
