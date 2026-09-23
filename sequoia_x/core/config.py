@@ -10,6 +10,17 @@ class Settings(BaseSettings):
     task_db_path: str = "data/tasks.db"
     task_history_limit: int = 200
     task_log_tail_lines: int = 200
+    # 服务层字段（T3，架构 §5）：全部带默认值，老 .env 不改一个字也能启动（约束 §7）。
+    api_host: str = "127.0.0.1"  # API_KEY 为空（无鉴权）时必须保持回环，见 .env.example 风险说明
+    api_port: int = 8000
+    api_key: str = ""  # 空串的语义是"不启用鉴权"，启动时会打 WARNING（T3 §4.2）
+    scheduler_enabled: bool = False  # T4 消费；默认关，防止一 clone 就到点往真人群推消息（约束 §6）
+    schedule_cron: str = "15 19 * * 1-5"  # T4 消费；标准 5 段 cron
+    # TIMEZONE 有两个消费方且刻意不同源：task/models.py 的 _now_iso 直接读 os.environ
+    # （任务层不 import 配置单例，避免 get_settings() 把 bootstrap 顺序约束渗进去），
+    # 本字段供调度器（T4）与 /api/info 展示用。二者需保持同名配置：.env 里设一次 TIMEZONE
+    # 即可同时生效（env 变量优先级高于字段默认值），换环境时别只改一边。
+    timezone: str = "Asia/Shanghai"
     feishu_webhook_url: str  # 必填字段，缺失时抛出 ValidationError
     strategy_webhooks: dict[str, str] = {}
 
