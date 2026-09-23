@@ -12,6 +12,8 @@ dependencies = [
     "pandas>=2.0",
     "requests>=2.31",
     "uvicorn[standard]>=0.30",
+    # T4 定时调度：4.x API 与 3.x 差异大，锁 3.x（任务书 T4 §4.1）
+    "apscheduler>=3.10,<4.0",
 ]
 
 [project.optional-dependencies]

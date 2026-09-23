@@ -72,6 +72,18 @@ def run_daily(
     count = engine.sync_today_bulk()
     logger.info(f"快照同步完成，写入 {count} 只股票")
 
+    if count == 0:
+        # 非交易日保护（T4 §4.4）：旧数据上重跑会选出与昨天相同的结果并再次推送
+        # 飞书（约束 §6 的骚扰场景），cron 的 1-5 排除不了法定节假日，在这里兜底。
+        # 刻意行为变更：CLI 在休市日同样打印本条 WARNING 后快速结束。
+        logger.warning("今日无新增行情（可能非交易日），跳过策略执行")
+        return DailyReport(
+            trade_date=date.today().strftime("%Y-%m-%d"),
+            synced_rows=0,
+            outcomes=[],
+            push_enabled=push,
+        )
+
     outcomes: list[StrategyOutcome] = []
     notifier = FeishuNotifier(settings, engine)
     for cls in resolve(strategies):

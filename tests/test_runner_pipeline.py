@@ -124,7 +124,8 @@ def test_run_daily_resolves_strategies_argument(tmp_path: Path) -> None:
     """strategies 参数原样透传给 resolve，由注册表决定解析语义。"""
     settings = _settings(tmp_path)
     engine = MagicMock()
-    engine.sync_today_bulk.return_value = 0
+    # 必须给非 0：T4 §4.4 起 synced_rows==0 会提前返回（休市日保护），不再走到 resolve
+    engine.sync_today_bulk.return_value = 7
     with (
         patch.object(pipeline, "DataEngine", MagicMock(return_value=engine)),
         patch.object(pipeline, "FeishuNotifier", MagicMock()),
@@ -133,6 +134,30 @@ def test_run_daily_resolves_strategies_argument(tmp_path: Path) -> None:
         report = pipeline.run_daily(settings, strategies=["turtle", "ma_volume"])
     mock_resolve.assert_called_once_with(["turtle", "ma_volume"])
     assert report.outcomes == []
+
+
+def test_run_daily_skips_strategies_when_no_new_data(tmp_path: Path) -> None:
+    """synced_rows==0（休市日）：resolve/notifier 零构造、outcomes 空、send 零调用。
+
+    T4 §4.4 的节假日保护：若没有这道提前返回，调度在法定节假日到点会在旧数据上
+    重跑并再次推送飞书（约束 §6，推送不可撤回）。
+    """
+    engine = MagicMock()
+    engine.sync_today_bulk.return_value = 0
+    notifier_cls = MagicMock()
+    resolve_mock = MagicMock(return_value=[])
+    with (
+        patch.object(pipeline, "DataEngine", MagicMock(return_value=engine)),
+        patch.object(pipeline, "FeishuNotifier", notifier_cls),
+        patch.object(pipeline, "resolve", resolve_mock),
+    ):
+        report = pipeline.run_daily(_settings(tmp_path))
+    resolve_mock.assert_not_called()
+    notifier_cls.assert_not_called()
+    assert report.synced_rows == 0
+    assert report.outcomes == []
+    assert report.total_signals == 0
+    assert report.push_enabled is True
 
 
 def test_run_backfill_syncs_basic_then_backfills(tmp_path: Path) -> None:
