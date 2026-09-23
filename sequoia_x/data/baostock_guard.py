@@ -33,6 +33,10 @@ logger = get_logger(__name__)
 _TERMINATOR = b"<![CDATA[]]>\n"
 _LOGIN_TIMEOUT = 10.0
 _LOGIN_CONNECT_TIMEOUT = 8.0
+# 单只股票日 K 查询的响应体很小（几十行），正常毫秒级返回；20s 足够覆盖偶发慢响应。
+# 全局 60s 是留给"全市场证券列表"那种 52 万字节大响应的，套在逐只查询上会让一次
+# 网络抖动拖满一分钟，5222 只里出现几次就是几分钟的无效等待。见 _send_msg。
+_QUERY_TIMEOUT = 20.0
 _installed = False
 
 
@@ -82,13 +86,19 @@ def _send_msg(msg: str):
         logger.warning("baostock 未登录，请先调用 bs.login()")
         return None
 
-    # 登录握手正常在毫秒级返回；服务端限流时它会一直挂到超时。全局 60s 是给
-    # 全市场证券列表那种大响应留的，套在登录上会把一次重登拖成一分钟空等。
-    is_login = msg.split(cons.MESSAGE_SPLIT)[1] == cons.MESSAGE_TYPE_LOGIN_REQUEST
+    # 按请求类型收紧超时：
+    # - 登录（00）：握手毫秒级，服务端限流时会挂满整个超时，用 10s；
+    # - 逐只日 K（95）：响应体很小，20s 足够，网络抖动时不至于拖满全局 60s；
+    # - 其余（尤其 45 全市场列表，单次 52 万字节、耗时 60~72s）保留全局超时。
+    req_type = msg.split(cons.MESSAGE_SPLIT)[1]
+    is_login = req_type == cons.MESSAGE_TYPE_LOGIN_REQUEST
+    is_small_query = req_type == cons.MESSAGE_TYPE_GETKDATAPLUS_REQUEST
     default_timeout = sock.gettimeout()
     try:
         if is_login:
             sock.settimeout(_LOGIN_TIMEOUT)
+        elif is_small_query:
+            sock.settimeout(_QUERY_TIMEOUT)
         sock.send(bytes(msg + "\n", encoding="utf-8"))
         receive = b""
         while True:
@@ -114,7 +124,7 @@ def _send_msg(msg: str):
         drop_connection()
         return None
     finally:
-        if is_login:
+        if is_login or is_small_query:
             try:
                 sock.settimeout(default_timeout)
             except OSError:  # 连接已被 drop_connection 关掉

@@ -1,6 +1,7 @@
 """数据引擎模块：负责 SQLite 行情数据存储与 baostock 增量同步。"""
 
 import sqlite3
+from datetime import date, datetime
 from pathlib import Path
 
 import baostock.common.contants as cons
@@ -14,6 +15,17 @@ from sequoia_x.data import baostock_guard as bs_guard
 logger = get_logger(__name__)
 
 bs_guard.install()
+
+# A 股收盘 15:00，日线数据落库有几分钟延迟，留到 15:10 才算「当日已收盘」。
+_MARKET_CLOSE_HOUR = 15
+_MARKET_CLOSE_MINUTE = 10
+
+
+def _after_close() -> bool:
+    """当前时刻是否已过 A 股当日收盘 + 数据落库延迟。"""
+    now = datetime.now()
+    return (now.hour, now.minute) >= (_MARKET_CLOSE_HOUR, _MARKET_CLOSE_MINUTE)
+
 
 
 _CREATE_TABLE_SQL = """
@@ -193,7 +205,10 @@ class BaostockSession:
         return False
 
     def call(self, func_name: str, **kwargs):
-        """按名字调用 baostock 查询接口（需要已登录的会话）。"""
+        """按名字调用 baostock 查询接口（需要已登录的会话）。
+
+        `reconnect=False` 时不重连（见 query_k 的说明），失败原样返回。
+        """
         import baostock as bs
 
         func = getattr(bs, func_name)
@@ -203,9 +218,16 @@ class BaostockSession:
         return rs
 
     def query_k(self, bs_code: str, start: str, end: str):
-        """单只股票日 K（后复权）。"""
-        return self.call(
-            "query_history_k_data_plus",
+        """单只股票日 K（后复权）。
+
+        不自动重连：`query_history_k_data_plus` 内部把 send_msg 的 None 转成
+        10002007 错误码返回（history.py:105），看起来像"会话失效"，但逐只拉全市场
+        时一次网络抖动就会让成百上千只都返回该码 —— 每只都重连等于把"按连接频率
+        封禁"的坑重新挖开。这里失败就失败，交给调用方跳过、下一轮续传。
+        """
+        import baostock as bs
+
+        return bs.query_history_k_data_plus(
             code=bs_code,
             fields="date,open,high,low,close,volume,amount",
             start_date=start,
@@ -214,13 +236,19 @@ class BaostockSession:
             adjustflag="1",
         )
 
-    def last_trade_day(self, start: str, end: str) -> str | None:
+    def last_trade_day(self, start: str, end: str, *, closed_only: bool = False) -> str | None:
         """返回 [start, end] 内最后一个交易日，一次查询替代逐只试探。
 
         三种结果：
         - 正常：区间内的最大交易日；
         - None：区间内没有交易日（休市），调用方应跳过本轮而不是空跑几千次查询；
         - 查询失败：按 `end` 返回，宁可多跑也不因日历抖动漏数据。
+
+        `closed_only=True` 时排除「今天」这个当日（除非已过收盘时刻）：当天 15:00 前
+        跑批，baostock 对当日只会返回空行。若把它当目标日，查询区间会退化为
+        `已入库日+1 ~ 今天`，而实际能取到的只有到前一日为止 —— 目标是 9-23 却报
+        "更新到 9-24"，且当前一日数据也因当日为空而整批丢弃。取上一个已收盘交易日
+        才能拿到真正有数据的收盘价。
         """
         try:
             rs = self.call("query_trade_dates", start_date=start, end_date=end)
@@ -236,7 +264,16 @@ class BaostockSession:
             row = rs.get_row_data()  # [calendar_date, is_trading_day]
             if row[1] == "1":
                 days.append(row[0])
-        return max(days) if days else None
+        if not days:
+            return None
+
+        target = max(days)
+        if closed_only and target == date.today().strftime("%Y-%m-%d") and not _after_close():
+            # 今天尚未收盘：退回上一个交易日，避免把当日空数据当目标
+            prior = [d for d in days if d < target]
+            if prior:
+                target = max(prior)
+        return target
 
 
 class DataEngine:
@@ -349,8 +386,12 @@ class DataEngine:
                 logger.error("baostock 不可用，本轮无增量（已无 akshare 兜底）")
                 return 0
 
-            # 一次日历查询定目标日：休市日直接跳过，省掉 5200 次必然为空的逐只查询
-            target = session.last_trade_day(min(t[2] for t in tasks), today_str)
+            # 一次日历查询定目标日：休市日直接跳过，省掉 5200 次必然为空的逐只查询。
+            # closed_only=True：当天 15:10 前不把「今天」当目标 —— baostock 对未收盘的
+            # 当日只返回空行，会让整轮跑批既拉不到当日、又丢掉前一日的收盘数据。
+            target = session.last_trade_day(
+                min(t[2] for t in tasks), today_str, closed_only=True
+            )
             if target is None:
                 logger.info(f"{today_str} 前无待补交易日（休市），跳过增量同步")
                 return 0
@@ -360,12 +401,53 @@ class DataEngine:
                 return 0
 
             logger.info(f"需要更新 {len(tasks)} 只股票到 {target}，单进程串行拉取（1 条连接）...")
+            failed = 0
+            consecutive_failed = 0
+            # 连接中途断掉时后续每只都会立刻失败。这里不是直接收工（那会丢掉剩余的
+            # 几千只），而是重连一次接着跑：重连受本轮登录预算约束，整轮最多新增
+            # 个位数连接，不会把"按连接频率封禁"的坑挖开。
+            reconnect_after = 10   # 连续失败到这个数，重连一次
+            max_reconnects = 2     # 一轮最多主动重连几次（防服务端持续不可用时刷连接）
+            reconnects = 0
             for symbol, bs_code, start, end in tasks:
-                rs = session.query_k(bs_code, start, end)
-                if rs.error_code != "0":
-                    continue
-                while rs.next():
-                    all_rows.append([symbol] + rs.get_row_data())
+                try:
+                    rs = session.query_k(bs_code, start, end)
+                    if rs.error_code == "0":
+                        while rs.next():
+                            all_rows.append([symbol] + rs.get_row_data())
+                        consecutive_failed = 0
+                        continue
+                    failed += 1
+                    consecutive_failed += 1
+                except Exception as exc:
+                    # 单只异常不拖垮整轮：已取到的数据照常入库，下一轮续传。
+                    failed += 1
+                    consecutive_failed += 1
+                    if failed <= 5:
+                        logger.warning(f"[{symbol}] 拉取失败：{exc}")
+
+                if consecutive_failed >= reconnect_after:
+                    if reconnects >= max_reconnects:
+                        logger.warning(
+                            f"已重连 {reconnects} 次仍连续失败，判定 baostock 持续不可用，"
+                            f"提前收工（已取 {len(all_rows)} 条，可重跑续传）"
+                        )
+                        break
+                    reconnects += 1
+                    if bs_login(max_retries=1):
+                        logger.warning(
+                            f"连续 {consecutive_failed} 只失败，已重连（第 {reconnects} 次）继续"
+                        )
+                        consecutive_failed = 0
+                    else:
+                        logger.warning(
+                            f"连续 {consecutive_failed} 只失败且重连失败，提前收工"
+                            f"（已取 {len(all_rows)} 条，可重跑续传）"
+                        )
+                        break
+
+            if failed:
+                logger.warning(f"本轮 {failed} 只拉取失败（已跳过，可重跑续传）")
 
         if not all_rows:
             logger.info("无新数据（可能无成交）")

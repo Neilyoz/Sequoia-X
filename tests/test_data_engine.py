@@ -264,6 +264,108 @@ def test_sync_today_bulk_skips_on_non_trading_day(tmp_path: Path) -> None:
     assert k_mock.called is False
 
 
+# 未收盘时目标日不得取「今天」：否则查区间含空的当日，前一交易日的数据也拿不到
+def test_sync_today_bulk_targets_last_closed_day_before_close(tmp_path: Path) -> None:
+    engine = _make_engine(tmp_path, "bulk_closed.db")
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute(
+            "INSERT INTO stock_daily (symbol, date, close, volume)"
+            " VALUES ('000001', '2026-09-22', 10.0, 100.0)"
+        )
+        conn.commit()
+
+    k_calls: list[dict] = []
+
+    with patch("sequoia_x.data.engine._after_close", return_value=False), \
+         patch("baostock.login", return_value=_FakeResult([], error_code="0")), \
+         patch("baostock.logout"), \
+         patch("baostock.query_trade_dates",
+               return_value=_FakeResult([["2026-09-23", "1"], ["2026-09-24", "1"]])), \
+         patch("baostock.query_history_k_data_plus",
+               side_effect=lambda **kw: k_calls.append(kw) or _FakeResult(
+                   [["2026-09-23", "10", "11", "9", "10.5", "1000", "10500"]])):
+        written = engine.sync_today_bulk()
+
+    # 未收盘 → 目标日退到 9-23；查询的 end_date 必须是 9-23 而不是今天
+    assert written == 1
+    assert len(k_calls) == 1
+    assert k_calls[0]["start_date"] == "2026-09-23"
+    assert k_calls[0]["end_date"] == "2026-09-23"
+    with sqlite3.connect(engine.db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM stock_daily WHERE date = '2026-09-23'"
+        ).fetchone()[0] == 1
+
+
+# 单只查询抛异常（如超时）不得拖垮整轮：已取到的照常入库
+def test_sync_today_bulk_survives_per_symbol_failure(tmp_path: Path) -> None:
+    engine = _make_engine(tmp_path, "bulk_partial.db")
+    with sqlite3.connect(engine.db_path) as conn:
+        for symbol in ["000001", "600000", "300750"]:
+            conn.execute(
+                "INSERT INTO stock_daily (symbol, date, close, volume)"
+                " VALUES (?, '2024-01-02', 10.0, 100.0)",
+                (symbol,),
+            )
+        conn.commit()
+
+    def fake_k(**kw):
+        if "600000" in kw["code"]:
+            raise TimeoutError("timed out")
+        return _FakeResult([[kw["start_date"], "10", "11", "9", "10.5", "1000", "10500"]])
+
+    with patch("baostock.login", return_value=_FakeResult([], error_code="0")), \
+         patch("baostock.logout"), \
+         patch("baostock.query_trade_dates",
+               return_value=_FakeResult([["2024-01-03", "1"]])), \
+         patch("baostock.query_history_k_data_plus", side_effect=fake_k):
+        written = engine.sync_today_bulk()
+
+    # 600000 超时被跳过，另两只正常写入
+    assert written == 2
+
+
+# 连接中途断掉：连续失败达阈值时重连一次接着跑，而不是丢掉剩余全部
+def test_sync_today_bulk_reconnects_after_consecutive_failures(tmp_path: Path) -> None:
+    engine = _make_engine(tmp_path, "bulk_reconnect.db")
+    symbols = [f"{i:06d}" for i in range(1, 16)]
+    with sqlite3.connect(engine.db_path) as conn:
+        for symbol in symbols:
+            conn.execute(
+                "INSERT INTO stock_daily (symbol, date, close, volume)"
+                " VALUES (?, '2024-01-02', 10.0, 100.0)",
+                (symbol,),
+            )
+        conn.commit()
+
+    logins: list[int] = []
+
+    def fake_login(*a, **k):
+        logins.append(1)
+        return _FakeResult([], error_code="0")
+
+    call_state = {"n": 0}
+
+    def fake_k(**kw):
+        call_state["n"] += 1
+        # 第 2~11 次请求失败（凑满连续 10 次触发重连），之后恢复
+        if 2 <= call_state["n"] <= 11:
+            return _FakeResult([], error_code="10002007", error_msg="网络接收错误。")
+        return _FakeResult([[kw["start_date"], "10", "11", "9", "10.5", "1000", "10500"]])
+
+    with patch("baostock.login", side_effect=fake_login), \
+         patch("baostock.logout"), \
+         patch("baostock.query_trade_dates",
+               return_value=_FakeResult([["2024-01-03", "1"]])), \
+         patch("baostock.query_history_k_data_plus", side_effect=fake_k):
+        written = engine.sync_today_bulk()
+
+    # 首次登录 + 至少一次重连
+    assert len(logins) >= 2
+    # 重连后恢复拉取：最后一批股票被写入
+    assert written >= 3
+
+
 # 红线：整轮回填同样只登录一次，且用一次日历查询定终点
 def test_backfill_uses_single_login(tmp_path: Path) -> None:
     engine = _make_engine(tmp_path, "backfill.db")

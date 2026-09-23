@@ -61,9 +61,17 @@ def test_login_request_uses_short_timeout_then_restores() -> None:
     assert sock.timeouts == [guard._LOGIN_TIMEOUT, 60.0]
 
 
-def test_non_login_request_keeps_default_timeout() -> None:
+def test_small_query_uses_short_timeout_then_restores() -> None:
+    """逐只日 K（95）响应体小：收紧到 _QUERY_TIMEOUT，返回后恢复，不污染全局 60s。"""
     sock = _FakeSock([_reply(cons.MESSAGE_TYPE_GETKDATAPLUS_REQUEST, "0\x01success")])
     _run(sock, _msg(cons.MESSAGE_TYPE_GETKDATAPLUS_REQUEST, "query_history_k_data_plus"))
+    assert sock.timeouts == [guard._QUERY_TIMEOUT, 60.0]
+
+
+def test_big_response_request_keeps_default_timeout() -> None:
+    """全市场证券列表（45）单次 52 万字节、耗时 60~72s，必须保留全局超时。"""
+    sock = _FakeSock([_reply(cons.MESSAGE_TYPE_QUERYSTOCKBASIC_RESPONSE, "0\x01success")])
+    _run(sock, _msg(cons.MESSAGE_TYPE_QUERYSTOCKBASIC_REQUEST, "query_stock_basic"))
     assert sock.timeouts == []
 
 
