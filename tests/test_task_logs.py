@@ -9,6 +9,7 @@ from sequoia_x.core import logger as core_logger
 from sequoia_x.task.logs import (
     TaskLogCapture,
     attach_to_sequoia_loggers,
+    detach_from_sequoia_loggers,
     set_current_task,
 )
 
@@ -18,12 +19,8 @@ def _record(msg: str) -> logging.LogRecord:
 
 
 def _detach(handler: logging.Handler) -> None:
-    """把捕获 handler 从全局注册表与所有 logger 上摘掉，避免污染后续测试。"""
-    if handler in core_logger._extra_handlers:
-        core_logger._extra_handlers.remove(handler)
-    for lg in list(logging.Logger.manager.loggerDict.values()):
-        if isinstance(lg, logging.Logger) and handler in lg.handlers:
-            lg.removeHandler(handler)
+    """清扫：走生产的 detach，顺带验证它真的可用、不留残留。"""
+    detach_from_sequoia_loggers(handler)
 
 
 @pytest.fixture(autouse=True)
@@ -112,6 +109,29 @@ def test_attach_covers_existing_and_future_loggers() -> None:
         before = list(future.handlers)
         attach_to_sequoia_loggers(capture)
         assert list(future.handlers) == before
+    finally:
+        _detach(capture)
+        capture.close()
+
+
+def test_detach_cleans_up_everywhere() -> None:
+    """detach 是 attach 的完整逆操作：注册表、已挂 logger、emit 三条路径都摘干净。"""
+    capture = TaskLogCapture()
+    try:
+        attached = core_logger.get_logger("sequoia_x.test_detach_logger")
+        attach_to_sequoia_loggers(capture)
+        assert capture in attached.handlers
+        assert capture in core_logger._extra_handlers
+
+        detach_from_sequoia_loggers(capture)
+        assert capture not in attached.handlers
+        assert capture not in core_logger._extra_handlers
+        # detach 之后新建的 logger 不再被钩子挂上
+        fresh = core_logger.get_logger("sequoia_x.test_detach_fresh")
+        assert capture not in fresh.handlers
+        set_current_task("t-detach")
+        attached.info("摘除后的日志不应再进缓冲")
+        assert capture._buffers == {}
     finally:
         _detach(capture)
         capture.close()

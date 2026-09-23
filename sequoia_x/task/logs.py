@@ -64,3 +64,19 @@ def attach_to_sequoia_loggers(handler: logging.Handler) -> None:
             continue
         if (name == "sequoia_x" or name.startswith("sequoia_x.")) and handler not in lg.handlers:
             lg.addHandler(handler)
+
+
+def detach_from_sequoia_loggers(handler: logging.Handler) -> None:
+    """attach_to_sequoia_loggers 的逆操作：从注册表与所有已挂 logger 上摘除。
+
+    没有这一步，每个新建的 TaskManager 都会往进程级 logger 树上漏一个 handler：
+    测试里多个 app 实例叠挂会让日志缓冲跨任务串台（T3 实测踩到，
+    多个 TestClient app 让存量 test_logger 属性测试假红）。
+    """
+    from sequoia_x.core import logger as core_logger
+
+    if handler in core_logger._extra_handlers:
+        core_logger._extra_handlers.remove(handler)
+    for lg in logging.Logger.manager.loggerDict.values():
+        if isinstance(lg, logging.Logger) and handler in lg.handlers:
+            lg.removeHandler(handler)

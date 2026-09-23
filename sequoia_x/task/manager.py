@@ -19,7 +19,12 @@ from typing import Any
 from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
 from sequoia_x.runner import pipeline
-from sequoia_x.task.logs import TaskLogCapture, attach_to_sequoia_loggers, set_current_task
+from sequoia_x.task.logs import (
+    TaskLogCapture,
+    attach_to_sequoia_loggers,
+    detach_from_sequoia_loggers,
+    set_current_task,
+)
 from sequoia_x.task.models import (
     TaskAlreadyRunning,
     TaskKind,
@@ -57,10 +62,15 @@ class TaskManager:
         )
 
     def shutdown(self, wait: bool = False) -> None:
-        """关池不杀任务：正在跑的 baostock 连接被硬切会留下脏 socket，比等它跑完更糟。"""
+        """关池不杀任务：正在跑的 baostock 连接被硬切会留下脏 socket，比等它跑完更糟。
+
+        同时摘掉 start() 挂上的日志捕获 handler：T3 起服务会反复建/销 app，
+        不摘就会在进程级 logger 树上越积越多（见 logs.detach_from_sequoia_loggers）。
+        """
         if self._executor is not None:
             self._executor.shutdown(wait=wait, cancel_futures=False)
             self._executor = None
+        detach_from_sequoia_loggers(self._capture)
 
     def submit(
         self, kind: TaskKind, *, params: dict[str, Any], triggered_by: str
