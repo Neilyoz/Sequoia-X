@@ -19,7 +19,6 @@ class Settings(BaseSettings):
     @classmethod
     def settings_customise_sources(cls, settings_cls, **kwargs):  # type: ignore[override]
         """扩展配置源，支持从环境变量中扫描 STRATEGY_WEBHOOK_ 前缀的键。"""
-        from pydantic_settings import EnvSettingsSource
         import os
 
         sources = super().settings_customise_sources(settings_cls, **kwargs)
@@ -34,7 +33,6 @@ class Settings(BaseSettings):
 
         # 注入到初始化数据中（通过 init_kwargs source）
         if webhooks:
-            original_init = kwargs.get("init_settings")
             # 直接在 env 层注入，通过 model_post_init 处理
             os.environ.setdefault("_STRATEGY_WEBHOOKS_PARSED", "1")
             # 存储解析结果供 model_validator 使用

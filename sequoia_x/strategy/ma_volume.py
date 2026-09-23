@@ -1,7 +1,5 @@
 """均线+成交量选股策略：5日均线上穿20日均线且成交量放大。"""
 
-import pandas as pd
-
 from sequoia_x.core.logger import get_logger
 from sequoia_x.strategy.base import BaseStrategy
 

@@ -14,7 +14,8 @@ class TurtleTradeStrategy(BaseStrategy):
     选股条件（向量化，严禁 iterrows）：
     1. 突破新高：今日 close > 前20个交易日 high 的最大值
     2. 流动性：今日 turnover > 100,000,000
-    3. 防诱多过滤：今日必须是实体阳线（今日 close > 今日 open），且必须真涨（今日 close > 昨日 close）
+    3. 防诱多过滤：今日必须是实体阳线（今日 close > 今日 open），
+       且必须真涨（今日 close > 昨日 close）
 
     Attributes:
         webhook_key: 路由到 'turtle' 专属飞书机器人。
