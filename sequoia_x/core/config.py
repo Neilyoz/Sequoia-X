@@ -6,6 +6,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     db_path: str = "data/sequoia_v2.db"
     start_date: str = "2024-01-01"
+    # 任务层三字段（架构 §5）：默认值必须让老 .env 一个字不改也能启动（约束 §7）。
+    task_db_path: str = "data/tasks.db"
+    task_history_limit: int = 200
+    task_log_tail_lines: int = 200
     feishu_webhook_url: str  # 必填字段，缺失时抛出 ValidationError
     strategy_webhooks: dict[str, str] = {}
 
