@@ -2,8 +2,8 @@
  * 登录页（任务书 §4.3）。
  *
  * 安全约定（本次追加决策的核心，改动前请先读完）：
- * - API Key **只存在于组件 state**，随页面卸载消失。绝不写 localStorage / sessionStorage /
- *   cookie：那等于把服务端唯一凭据长期留在浏览器里，跨站脚本一偷一个准，
+ * - API Key **只存在于组件 state**，随页面卸载消失。绝不写入浏览器持久化存储或普通 cookie：
+ *   那等于把服务端唯一凭据长期留在浏览器里，跨站脚本一偷一个准，
  *   也让"HttpOnly session cookie"这层设计白做（03 §2）。
  * - 因此**也不使用受控之外的任何缓存**：不自动填充、不记住上次输入。
  * - 成功用 `location.replace`：不留历史记录，用户按"后退"不会退回登录页。
@@ -82,7 +82,7 @@ export default function LoginPage() {
   return (
     <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-4">
       <div className="w-full max-w-sm rounded border border-zinc-200 bg-white p-6">
-        <h1 className="text-lg font-medium text-zinc-900">登录 Sequoia-X 信号看板</h1>
+        <h1 className="text-lg font-medium text-zinc-900">登录 Sequoia-X 行情页</h1>
         <p className="mt-1 text-sm text-zinc-500">
           密钥配置在服务端 <code className="rounded bg-zinc-100 px-1">.env</code> 的{" "}
           <code className="rounded bg-zinc-100 px-1">API_KEY</code>。

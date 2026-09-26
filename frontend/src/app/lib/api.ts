@@ -113,6 +113,7 @@ const KNOWN_CODES: readonly ApiErrorCode[] = [
   "unknown_strategy",
   "task_already_running",
   "database_not_seeded",
+  "stock_list_not_seeded",
   "internal_error",
 ];
 
@@ -258,7 +259,7 @@ export const api = {
   strategies: (): Promise<StrategyInfo[]> =>
     requestJson<StrategyInfo[]>("/api/strategies", { method: "GET" }),
 
-  /** 信号列表：看板唯一的数据来源。 */
+  /** 历史选股信号查询：保留给其他客户端使用，首页展示股票清单。 */
   signals: (query: SignalQuery): Promise<SignalListResponse> =>
     requestJson<SignalListResponse>(buildSignalQuery(query), { method: "GET" }),
 
@@ -266,7 +267,7 @@ export const api = {
   stocks: (query: StockListQuery): Promise<StockListResponse> =>
     requestJson<StockListResponse>(buildStockListQuery(query), { method: "GET" }),
 
-  /** 单只股票本地日线；limit 只能使用看板提供的范围选项。 */
+  /** 单只股票本地日线；limit 只能使用页面提供的范围选项。 */
   ohlcv: (symbol: string, limit: OhlcvLimit): Promise<OhlcvResponse> => {
     const params = new URLSearchParams({ limit: String(limit) });
     return requestJson<OhlcvResponse>(

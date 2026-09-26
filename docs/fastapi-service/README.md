@@ -20,7 +20,7 @@
 | 交付范围 | **服务化核心 + 运维配套**：触发/状态/选股结果/行情查询接口 + API Key 鉴权 + 测试 + 文档 |
 | 前端技术栈 | **Next.js 16.3 + TypeScript + Tailwind**，工程目录 **`frontend/`**（追加需求） |
 | 前端部署 | **`output: 'export'` 静态导出**，由 FastAPI `StaticFiles` 挂载，**与 API 同源同端口** |
-| 前端范围 | **只有一个选股信号看板**（+ 必需的登录页）。不做仪表盘、不做在线触发、不做 K 线图 |
+| 前端范围 | 股票行情页（+ 必需的登录页）：浏览本地 A 股列表，点击后在当前页查看日 K 线和成交量 |
 | 浏览器鉴权 | **登录页输 API Key 换 HttpOnly session cookie**；`/api/*` 接受 cookie 或 `X-API-Key` 任一 |
 
 追加范围的设计与坑位集中在 [03-frontend-and-auth.md](./03-frontend-and-auth.md)，
@@ -45,7 +45,7 @@ T1 runner 编排层 ──┬── T2 任务管理 ────┬── T3 Fas
                                                 │
                           T7 session 鉴权 + 静态托管（后端） ◄┘
                                                 │
-                          T8 Next.js 信号看板（frontend/）
+                          T8 Next.js 浏览器页面（frontend/）
                                                 │
                           T1..T5,T7,T8 全部完成 ─┴── T6 测试/依赖/文档收口
 ```
@@ -68,7 +68,7 @@ T7 与 T8 **不可**并行，T8 依赖 T7 的登录契约）。
 | T4 | [tasks/T4-scheduler.md](./tasks/T4-scheduler.md) | `sequoia_x/scheduler/` 与 lifespan 接线 | T3 |
 | T5 | [tasks/T5-query-apis.md](./tasks/T5-query-apis.md) | 选股结果 / 行情 / 策略清单查询路由 | T3 |
 | T7 | [tasks/T7-session-auth-static.md](./tasks/T7-session-auth-static.md) | `api/auth.py`、`/api/auth/*`、前端静态挂载 | T3、T5 |
-| T8 | [tasks/T8-nextjs-signals-board.md](./tasks/T8-nextjs-signals-board.md) | `frontend/` Next.js 信号看板 | T7 |
+| T8 | [tasks/T8-nextjs-signals-board.md](./tasks/T8-nextjs-signals-board.md) | `frontend/` Next.js 浏览器页面与登录 | T7 |
 | T6 | [tasks/T6-tests-docs-deps.md](./tasks/T6-tests-docs-deps.md) | 测试补全、依赖锁定、README 与部署文档 | T1..T5、T7、T8 |
 
 ## 3. 派单方式（给开发经理用）
@@ -120,11 +120,11 @@ T7 与 T8 **不可**并行，T8 依赖 T7 的登录契约）。
 13. `cd frontend && npm ci && npm run build` 成功产出 `frontend/out/`，
     且 `frontend/out/` **未被 git 跟踪**、`package-lock.json` **已提交**。
 14. 构建后访问 `http://127.0.0.1:8000/` 能看到登录页，输入 `.env` 里的 `API_KEY`
-    登录后**看到真实信号数据**；此时 `/health`、`/docs`、`/api/*` 均未被静态挂载遮蔽。
+    登录后能看到股票清单并选择股票查看本地日 K 线；此时 `/health`、`/docs`、`/api/*` 均未被静态挂载遮蔽。
 15. 刷新 `/login/` 与 `/` 都不 404；浏览器 Network 面板**无任何指向 :3000 的请求**。
 16. API Key 不出现在 `localStorage` / `sessionStorage` / cookie 中
     （`grep -rn "localStorage\|sessionStorage" frontend/src` 无结果）。
-17. 看板在加载 / 空结果 / 后端错误 / 未回填四种状态下都有明确中文文案，无白屏与死转圈。
+17. 股票清单与日 K 线在加载 / 空结果 / 后端错误 / 未同步状态下都有明确中文文案，无白屏与死转圈。
 
 以上 17 条构成整体验收口径，T6 的汇报必须逐条给结论与证据。
 

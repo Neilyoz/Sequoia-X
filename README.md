@@ -13,6 +13,10 @@ Sequoia-X V2 是面向 A 股市场的量化选股系统，基于现代 Python �
 存储于本地 SQLite，彻底规避东方财富反爬问题。baostock 的风控盯的是**新建连接频率**而非
 请求量，因此数据同步固定为单进程单连接，详见[数据说明](#数据说明)。
 
+项目同时提供 FastAPI 服务和浏览器行情页：登录后可搜索、分页浏览本地 A 股清单，点击股票查看
+本地日 K 线与成交量。页面不会因查询而触发数据源同步；首次使用前运行 `python main.py --names`
+同步股票名称，运行 `python main.py --backfill` 回填历史日线。
+
 ---
 
 ## 运行模式
@@ -22,6 +26,7 @@ python main.py                  # 日常模式：单进程串行增量补数据 
 python main.py --backfill       # 回填模式：全市场历史K线一次性灌入（约12分钟）
 python main.py --names          # 只同步股票名称（数据源 baostock）
 python main.py --reset-baostock # 清除 baostock 熔断状态（换出口 IP 后用）
+uv run uvicorn sequoia_x.api.app:app --port 8000 # 启动服务与浏览器行情页
 ```
 
 ---

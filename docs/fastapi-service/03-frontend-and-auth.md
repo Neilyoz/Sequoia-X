@@ -9,12 +9,12 @@
 | --- | --- |
 | 技术栈 | **Next.js 16.3**（锁 `next@16.3.x`），工程目录 **`frontend/`**，TypeScript + Tailwind CSS |
 | 部署形态 | **`output: 'export'` 静态导出**，由 FastAPI `StaticFiles` 托管，**与 API 同端口同源** |
-| 页面范围 | **只有一个选股信号看板**（+ 必需的登录页）。不做仪表盘、不做跑批触发、不做任务详情、不做 K 线图 |
+| 页面范围 | 一个行情页（+ 必需的登录页）：搜索、分页浏览本地 A 股清单，并在当前页详情区查看所选股票日 K 线与成交量 |
 | 鉴权 | **登录页输入 API Key → 换取 HttpOnly session cookie**；`/api/*` 接受 cookie 或 `X-API-Key` 任一 |
 | 视觉 | 功能优先，朴素干净。Tailwind + 少量自写组件，**不引入组件库**（shadcn 需要一次性写入大量文件，本次不值） |
 | 包管理 | **npm**（Node 24 自带 npm 12），提交 `frontend/package-lock.json`。禁止混用 pnpm/yarn 造出第二份锁文件 |
 
-明确**不做**：仪表盘、跑批控制按钮、任务历史页、行情 K 线、策略开关管理、暗色主题切换、
+明确**不做**：仪表盘、跑批控制按钮、任务历史页、策略开关管理、暗色主题切换、
 国际化、SSR、Server Actions、WebSocket 实时推送、前端测试框架（Playbook/Jest 等）。
 
 ## 2. 为什么是"API Key 换 session"，而不是用户名密码
@@ -86,7 +86,7 @@ Next.js 的 `rewrites`（dev 期用来把 `/api` 代理到 `http://127.0.0.1:800
 - 只有 `generateStaticParams` 预渲染过的动态路由才能被 export 成 HTML。
   → **本次路由就两个：`/`（看板）和 `/login`。不要用 `[id]` 这类动态段路由。**
   详情类信息全部用客户端状态（弹窗/抽屉）展示，不占 URL。
-  这一条是"页面范围只有一个看板"决策带来的额外好处：绕开了 export 最麻烦的部分。
+  股票详情使用当前页客户端状态，不新增动态页面路由，绕开 export 的动态路由限制。
 - `trailingSlash: true`：导出产物是 `login/index.html` 形态，配合 FastAPI
   `StaticFiles(html=True)` 的目录索引行为，刷新 `/login/` 才不会 404。
 - `images: { unoptimized: true }`：export 下 `next/image` 的优化端点不可用。
@@ -110,9 +110,12 @@ Next.js 的 `rewrites`（dev 期用来把 `/api` 代理到 `http://127.0.0.1:800
 | 登录 | `POST /api/auth/login` | **T7 新增** |
 | 判断是否已登录（应用初始化） | `GET /api/auth/me` | **T7 新增** |
 | 退出 | `POST /api/auth/logout` | **T7 新增** |
-| 策略下拉选项 | `GET /api/strategies` | T3 已有 |
-| 信号列表 + 分页总数 | `GET /api/signals?start=&end=&strategy=&symbol=&limit=&offset=` | T5（本方案**新增 `start`/`end` 区间参数**） |
-| 空态提示所需（库是否已回填） | 复用 T5 的 409 `database_not_seeded` | T5 已有 |
+| 股票清单 + 分页总数 | `GET /api/market/stocks?keyword=&limit=&offset=` | 股票列表功能新增；从本地 `stock_basic` 只读查询 |
+| 所选股票日线 | `GET /api/market/{symbol}/ohlcv?limit=60\|120\|250\|500` | T5 已有；只读本地行情库 |
+| 股票清单未同步提示 | 409 `stock_list_not_seeded` | 股票列表功能新增 |
+| 登录、鉴权和登出 | `POST /api/auth/login`、`GET /api/auth/me`、`POST /api/auth/logout` | T7 新增 |
+
+首页保留服务端的选股信号 API 与跑批功能，但浏览器主页面展示股票清单和日 K 线，不展示信号表。
 
 T5 原来只有单日 `date` 参数，看板需要"最近 N 天"区间 → 已在 [T5 §4.3](./tasks/T5-query-apis.md)
 补入 `start`/`end`。**这是前端范围追加导致的唯一后端契约变更**，其余接口不动。
@@ -129,7 +132,7 @@ Sequoia-X/
 │   ├── .env.local.example         # 仅 NEXT_PUBLIC_* ；禁止放任何密钥
 │   └── src/app/
 │       ├── layout.tsx
-│       ├── page.tsx               # 信号看板
+│       ├── page.tsx               # 股票列表与日 K 线详情
 │       ├── login/page.tsx
 │       ├── globals.css            # Tailwind 入口
 │       └── lib/                   # api.ts（fetch 封装）、types.ts、signals.ts
@@ -158,7 +161,7 @@ cd frontend && npm ci && npm run build          # 产出 frontend/out
 浏览器打开 http://127.0.0.1:8000/
   → 未登录自动跳 /login/
   → 输入 .env 里的 API_KEY
-  → 看到信号看板
+  → 看到股票清单，可搜索并选择股票查看日 K 线
 ```
 
 开发热更新：`cd frontend && npm run dev`（:3000），

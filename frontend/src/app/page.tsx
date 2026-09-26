@@ -1,100 +1,71 @@
-/**
- * 选股信号看板（唯一主页面，任务书 §4.4）。
- *
- * 组件树：本页只管"状态装配 + 数据获取"，展示全部交给子组件。
- *
- * 两条容易写错的纪律，留在这里当注释：
- * 1. **切筛选条件必须把 offset 归零**（清单第 5/6 项）。所有条件变更都走 `applyFilters`，
- *    不给子组件直接改 filters 的旁路，这样"归零"这件事只有一处实现。
- * 2. **鉴权未确认前不渲染空看板**（§4.3）。首屏渲染的是占位，`/api/auth/me` 回来才决定
- *    渲染内容或跳登录页，避免"闪一下未登录空页面再跳"。
- */
-
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import FilterBar, { defaultFilters, type Filters } from "./components/FilterBar";
+import { useCallback, useEffect, useRef, useState } from "react";
+import KlineChart from "./components/KlineChart";
 import Pagination, { PAGE_SIZE_OPTIONS } from "./components/Pagination";
-import SignalTable from "./components/SignalTable";
 import StateBlock, { type BoardState, type ViewState } from "./components/StateBlock";
-import { ApiError, NOT_SEEDED_CODE, api, isRedirectingToLogin } from "./lib/api";
-import type { SignalItem, StrategyInfo } from "./lib/types";
+import StockList from "./components/StockList";
+import StockSearch from "./components/StockSearch";
+import { ApiError, api, isRedirectingToLogin } from "./lib/api";
+import type { OhlcvItem, OhlcvLimit, StockListItem } from "./lib/types";
 
-/** 默认每页条数：与后端 `limit` 默认值一致，也在 50/100/200 三档里。 */
-const DEFAULT_LIMIT = 100;
+const DEFAULT_LIMIT = 50;
+const KLINE_LIMITS: OhlcvLimit[] = [60, 120, 250, 500];
+const LOADING_LIST: BoardState = { kind: "loading", message: "正在加载股票清单…" };
 
-const READY_VIEW: ViewState = { kind: "ready" };
-// 加载态常量刻意标成 BoardState（而非 ViewState）：它要直接喂给 StateBlock。
-const LOADING_VIEW: BoardState = { kind: "loading" };
+type KlineState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready" }
+  | { kind: "empty" }
+  | { kind: "error"; message: string };
 
 export default function BoardPage() {
-  // 鉴权态：unknown=还没问过 /me（渲染占位），open/session/apikey=可以继续。
   const [authMode, setAuthMode] = useState<string | null>(null);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
-
-  const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
   const [version, setVersion] = useState<string | null>(null);
 
-  const [filters, setFilters] = useState<Filters>(defaultFilters);
-  const [limit, setLimit] = useState<number>(DEFAULT_LIMIT);
-  const [offset, setOffset] = useState<number>(0);
+  const [keyword, setKeyword] = useState("");
+  const keywordRef = useRef(keyword);
+  const [limit, setLimit] = useState(DEFAULT_LIMIT);
+  const [offset, setOffset] = useState(0);
+  const [stocks, setStocks] = useState<StockListItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [listState, setListState] = useState<ViewState>(LOADING_LIST);
 
-  const [items, setItems] = useState<SignalItem[]>([]);
-  const [total, setTotal] = useState<number>(0);
-  const [view, setView] = useState<ViewState>(LOADING_VIEW);
+  const [selected, setSelected] = useState<StockListItem | null>(null);
+  const [klineLimit, setKlineLimit] = useState<OhlcvLimit>(250);
+  const [ohlcv, setOhlcv] = useState<OhlcvItem[]>([]);
+  const [klineState, setKlineState] = useState<KlineState>({ kind: "idle" });
 
   useEffect(() => {
     let cancelled = false;
     api
       .me()
       .then((me) => {
-        if (!cancelled) {
-          setAuthMode(me.mode);
-        }
+        if (!cancelled) setAuthMode(me.mode);
       })
       .catch((error: unknown) => {
-        if (cancelled) {
-          return;
-        }
-        if (!isRedirectingToLogin(error)) {
-          // 非"跳登录中"的失败（服务没起、500）要如实报出来，不能卡在占位上。
-          setAuthMessage(
-            error instanceof ApiError ? error.message : "无法连接服务，请确认后端已启动",
-          );
-        }
+        if (cancelled || isRedirectingToLogin(error)) return;
+        setAuthMessage(
+          error instanceof ApiError ? error.message : "无法连接服务，请确认后端已启动",
+        );
       });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // 策略下拉与服务版本：都属于"辅助信息"，失败不影响主列表，静默降级即可。
-  // 必须等 /api/auth/me 有结果再发：未登录时这两个接口同样回 401，抢先发会把
-  // "一次 401 跳登录"变成三次 401 + 三次 location.replace（Network 面板可直接观察到）。
   useEffect(() => {
-    if (authMode === null) {
-      return;
-    }
+    if (authMode === null) return;
     let cancelled = false;
-    api
-      .strategies()
-      .then((list) => {
-        if (!cancelled) {
-          setStrategies(list);
-        }
-      })
-      .catch(() => {
-        // 拿不到策略清单时下拉只剩"全部策略"：日期/代码筛选仍可用，不值得为它整页报错。
-      });
     api
       .info()
       .then((info) => {
-        if (!cancelled) {
-          setVersion(info.version);
-        }
+        if (!cancelled) setVersion(info.version);
       })
       .catch(() => {
-        // 版本号是页脚的可选信息（任务书 §4.4「有则显，没有不强求」）。
+        // 服务版本是页脚可选信息，获取失败不影响股票列表。
       });
     return () => {
       cancelled = true;
@@ -102,76 +73,94 @@ export default function BoardPage() {
   }, [authMode]);
 
   useEffect(() => {
-    if (authMode === null) {
-      return;
-    }
+    if (authMode === null) return;
     let cancelled = false;
-    // 注意：这里**不**在 effect 体内 setView(loading)。加载态由"用户改了条件/翻了页"
-    // 那三个事件处理器置位（见 applyFilters / applyLimit / applyOffset），effect 只在
-    // 回调里落地结果 —— 既符合 react-hooks/set-state-in-effect 的要求，也避免
-    // 首次挂载时"先 loading 再 loading"的多余一次渲染。
     api
-      .signals({
-        start: filters.start,
-        end: filters.end,
-        strategy: filters.strategy,
-        symbol: filters.symbol,
-        limit,
-        offset,
-      })
+      .stocks({ keyword, limit, offset })
       .then((data) => {
-        if (cancelled) {
-          return;
-        }
-        setItems(data.items);
+        if (cancelled) return;
+        setStocks(data.items);
         setTotal(data.total);
-        setView(data.items.length === 0 ? { kind: "empty" } : READY_VIEW);
+        setListState(data.items.length === 0 ? { kind: "empty" } : { kind: "ready" });
       })
       .catch((error: unknown) => {
-        if (cancelled) {
-          return;
-        }
-        setItems([]);
+        if (cancelled || isRedirectingToLogin(error)) return;
+        setStocks([]);
         setTotal(0);
-        if (error instanceof ApiError && error.code === NOT_SEEDED_CODE) {
-          setView({ kind: "not_seeded" });
-        } else if (!isRedirectingToLogin(error)) {
-          setView({
+        if (error instanceof ApiError && error.code === "stock_list_not_seeded") {
+          setListState({ kind: "not_seeded" });
+        } else {
+          setListState({
             kind: "error",
-            message: error instanceof ApiError ? error.message : "网络异常，无法获取信号",
-            hint: "筛选条件已保留，修正后可直接重新查询",
+            message: error instanceof ApiError ? error.message : "网络异常，无法获取股票清单",
+            hint: "请检查服务状态后重试。",
           });
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [authMode, filters, limit, offset]);
+  }, [authMode, keyword, limit, offset]);
 
-  /** 条件变更的唯一入口：置加载态 + offset 归零（清单第 5/6 项）。 */
-  const applyFilters = useCallback((next: Filters) => {
-    setView(LOADING_VIEW);
-    setFilters(next);
+  useEffect(() => {
+    if (authMode === null || selected === null) return;
+    let cancelled = false;
+    api
+      .ohlcv(selected.symbol, klineLimit)
+      .then((data) => {
+        if (cancelled) return;
+        setOhlcv(data.items);
+        setKlineState(data.items.length === 0 ? { kind: "empty" } : { kind: "ready" });
+      })
+      .catch((error: unknown) => {
+        if (cancelled || isRedirectingToLogin(error)) return;
+        setOhlcv([]);
+        setKlineState({
+          kind: "error",
+          message: error instanceof ApiError ? error.message : "网络异常，无法获取日线数据",
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authMode, klineLimit, selected]);
+
+  const handleKeywordChange = useCallback((next: string) => {
+    if (keywordRef.current === next) return;
+    keywordRef.current = next;
+    setKeyword(next);
     setOffset(0);
+    setListState(LOADING_LIST);
   }, []);
 
-  const applyLimit = useCallback((next: number) => {
-    setView(LOADING_VIEW);
-    setLimit(next);
+  function changePage(nextOffset: number): void {
+    setListState(LOADING_LIST);
+    setOffset(nextOffset);
+  }
+
+  function changePageSize(nextLimit: number): void {
+    setListState(LOADING_LIST);
+    setLimit(nextLimit);
     setOffset(0);
-  }, []);
+  }
 
-  const applyOffset = useCallback((next: number) => {
-    setView(LOADING_VIEW);
-    setOffset(next);
-  }, []);
+  function selectStock(stock: StockListItem): void {
+    setSelected(stock);
+    setKlineState({ kind: "loading" });
+    setOhlcv([]);
+  }
+
+  function changeKlineLimit(nextLimit: OhlcvLimit): void {
+    setKlineLimit(nextLimit);
+    setKlineState({ kind: "loading" });
+    setOhlcv([]);
+  }
 
   async function logout(): Promise<void> {
     try {
       await api.logout();
     } catch {
-      // 登出失败也要离开本页：服务端会话要么已失效，要么 7 天后自己失效，
-      // 停在"点了没反应"的看板比多一个错误提示更糟。
+      // 服务端会话可能已失效，用户仍需离开当前页。
     } finally {
       window.location.replace("/login/");
     }
@@ -179,7 +168,7 @@ export default function BoardPage() {
 
   if (authMessage !== null) {
     return (
-      <main className="mx-auto max-w-6xl px-4 py-10">
+      <main className="mx-auto max-w-7xl px-4 py-10">
         <StateBlock state={{ kind: "error", message: authMessage }} />
       </main>
     );
@@ -187,23 +176,19 @@ export default function BoardPage() {
 
   if (authMode === null) {
     return (
-      <main className="mx-auto max-w-6xl px-4 py-10">
+      <main className="mx-auto max-w-7xl px-4 py-10">
         <p className="text-sm text-zinc-500">正在确认登录状态…</p>
-        <div className="mt-3">
-          <StateBlock state={LOADING_VIEW} />
-        </div>
+        <StateBlock state={{ kind: "loading", message: "正在连接服务…" }} />
       </main>
     );
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-6xl flex-col px-4 py-6">
-      <header className="flex flex-wrap items-center justify-between gap-2">
+    <main className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-6">
+      <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-medium text-zinc-900">Sequoia-X 选股信号看板</h1>
-          <p className="mt-1 text-sm text-zinc-500">
-            历史选股结果与雪球看盘入口。数据由服务端跑批任务维护，本页只读、不自动刷新。
-          </p>
+          <h1 className="text-xl font-medium text-zinc-900">Sequoia-X A 股行情</h1>
+          <p className="mt-1 text-sm text-zinc-500">搜索本地股票清单，查看对应的日 K 线与成交量。</p>
         </div>
         <div className="flex items-center gap-3 text-sm">
           {authMode === "open" ? (
@@ -212,9 +197,7 @@ export default function BoardPage() {
           {authMode === "session" ? (
             <button
               type="button"
-              onClick={() => {
-                void logout();
-              }}
+              onClick={() => void logout()}
               className="rounded border border-zinc-300 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100"
             >
               退出登录
@@ -223,43 +206,91 @@ export default function BoardPage() {
         </div>
       </header>
 
-      <div className="mt-5 space-y-4">
-        <FilterBar strategies={strategies} value={filters} onChange={applyFilters} />
-
-        {/* 顶部统计条：只报接口给的 total，不统计"本页去重策略数"那种会误导人的假数据。 */}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-600">
-          <span>
-            共 <strong className="font-medium text-zinc-900">{total}</strong> 条信号
-          </span>
-          <span className="text-zinc-400">
-            {filters.start} 至 {filters.end}
-          </span>
-          {filters.strategy ? (
-            <span className="text-zinc-400">策略 {filters.strategy}</span>
+      <div className="mt-6 grid min-w-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.6fr)]">
+        <section className="min-w-0 rounded-lg border border-zinc-200 bg-white p-4">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <h2 className="font-medium text-zinc-900">股票列表</h2>
+            <span className="text-xs text-zinc-500">共 {total} 只</span>
+          </div>
+          <StockSearch onChange={handleKeywordChange} />
+          <div className="mt-3">
+            {listState.kind === "ready" ? (
+              <StockList items={stocks} selectedSymbol={selected?.symbol ?? null} onSelect={selectStock} />
+            ) : (
+              <StateBlock state={listState} />
+            )}
+          </div>
+          {listState.kind === "ready" ? (
+            <div className="mt-4 border-t border-zinc-100 pt-4">
+              <Pagination
+                total={total}
+                limit={limit}
+                offset={offset}
+                onPageChange={changePage}
+                onLimitChange={changePageSize}
+              />
+            </div>
           ) : null}
-          {filters.symbol ? (
-            <span className="text-zinc-400">代码 {filters.symbol}</span>
-          ) : null}
-        </div>
+        </section>
 
-        {view.kind === "ready" ? <SignalTable items={items} /> : <StateBlock state={view} />}
+        <section className="min-w-0 rounded-lg border border-zinc-200 bg-white p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="font-medium text-zinc-900">日 K 线</h2>
+              {selected ? (
+                <p className="mt-1 text-sm text-zinc-500">
+                  <span className="font-mono">{selected.symbol}</span> · {selected.name}
+                </p>
+              ) : (
+                <p className="mt-1 text-sm text-zinc-500">选择一只股票查看本地日线</p>
+              )}
+            </div>
+            {selected ? (
+              <div className="flex items-center gap-1" aria-label="K线显示范围">
+                {KLINE_LIMITS.map((count) => (
+                  <button
+                    key={count}
+                    type="button"
+                    aria-pressed={klineLimit === count}
+                    onClick={() => changeKlineLimit(count)}
+                    className={`rounded px-2.5 py-1 text-xs ${
+                      klineLimit === count
+                        ? "bg-zinc-900 text-white"
+                        : "border border-zinc-300 text-zinc-600 hover:bg-zinc-100"
+                    }`}
+                  >
+                    {count} 日
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
 
-        {view.kind === "ready" && (
-          <Pagination
-            total={total}
-            limit={limit}
-            offset={offset}
-            onPageChange={applyOffset}
-            onLimitChange={applyLimit}
-          />
-        )}
+          <div className="mt-4 min-h-[360px] min-w-0">
+            {klineState.kind === "idle" ? (
+              <StateBlock
+                state={{ kind: "empty", title: "尚未选择股票", detail: "从左侧列表选择一只股票，查看其 K 线和成交量。" }}
+              />
+            ) : null}
+            {klineState.kind === "loading" ? (
+              <StateBlock state={{ kind: "loading", message: "正在加载日线数据…" }} />
+            ) : null}
+            {klineState.kind === "empty" ? (
+              <StateBlock
+                state={{ kind: "empty", title: "本地暂无日线数据", detail: "请先为该股票回填历史行情后再查看。" }}
+              />
+            ) : null}
+            {klineState.kind === "error" ? (
+              <StateBlock state={{ kind: "error", message: klineState.message }} />
+            ) : null}
+            {klineState.kind === "ready" ? <KlineChart items={ohlcv} /> : null}
+          </div>
+        </section>
       </div>
 
-      <footer className="mt-auto pt-8 text-xs text-zinc-400">
+      <footer className="pt-5 text-xs text-zinc-400">
         {version ? <span>服务版本 {version}</span> : null}
-        <span className="ml-3">
-          每页可选 {PAGE_SIZE_OPTIONS.join(" / ")} 条；信号明细以服务端跑批结果为准。
-        </span>
+        <span className="ml-3">列表每页 {PAGE_SIZE_OPTIONS.join(" / ")} 只；行情来自本地数据库。</span>
       </footer>
     </main>
   );

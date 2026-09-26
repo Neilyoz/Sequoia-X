@@ -9,8 +9,8 @@ import "./globals.css";
  * 排版直接用 Tailwind 默认字体栈（§4.6「不写自定义 CSS」）。
  */
 export const metadata = {
-  title: "Sequoia-X 选股信号看板",
-  description: "Sequoia-X 选股服务的历史信号看板：按日期区间与策略查看选股结果并跳转雪球。",
+  title: "Sequoia-X A 股行情",
+  description: "浏览本地 A 股清单并查看股票日 K 线与成交量。",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
