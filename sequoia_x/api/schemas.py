@@ -181,3 +181,19 @@ class StockBasicResponse(BaseModel):
     symbol: str
     name: str | None
     xueqiu_code: str
+
+
+class StockListItem(BaseModel):
+    """股票基础列表的一条记录。"""
+
+    symbol: str
+    name: str
+
+
+class StockListResponse(BaseModel):
+    """GET /api/market/stocks 的分页响应。"""
+
+    items: list[StockListItem]
+    total: int
+    limit: int
+    offset: int

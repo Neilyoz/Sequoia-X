@@ -1,6 +1,7 @@
 """数据引擎模块：负责 SQLite 行情数据存储与 baostock 增量同步。"""
 
 import sqlite3
+from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 
@@ -702,6 +703,37 @@ class DataEngine:
                 list(symbols),
             ).fetchall()
         return dict(rows)
+
+    def get_stock_basic_page(
+        self, *, keyword: str | None, limit: int, offset: int
+    ) -> tuple[list[dict[str, str]], int, bool]:
+        """只读查询股票基础列表，按代码或名称匹配关键词并分页。"""
+        normalized = (keyword or "").strip()
+        escaped = normalized.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        pattern = f"%{escaped}%"
+        db_uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+
+        with closing(sqlite3.connect(db_uri, uri=True)) as conn:
+            stock_count = conn.execute("SELECT COUNT(*) FROM stock_basic").fetchone()[0]
+            if normalized:
+                where = " WHERE symbol LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\'"
+                params: list[object] = [pattern, pattern]
+            else:
+                where = ""
+                params = []
+
+            total = conn.execute(
+                "SELECT COUNT(*) FROM stock_basic" + where, params
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT symbol, name FROM stock_basic"
+                + where
+                + " ORDER BY symbol ASC LIMIT ? OFFSET ?",
+                [*params, max(1, min(limit, 200)), max(0, offset)],
+            ).fetchall()
+
+        items = [{"symbol": row[0], "name": row[1]} for row in rows]
+        return items, total, bool(stock_count)
 
     def get_local_symbols(self) -> list[str]:
         with sqlite3.connect(self.db_path) as conn:

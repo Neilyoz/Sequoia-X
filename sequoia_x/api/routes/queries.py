@@ -25,6 +25,7 @@ from sequoia_x.api.schemas import (
     SignalItem,
     SignalListResponse,
     StockBasicResponse,
+    StockListResponse,
     TaskSignalsResponse,
 )
 from sequoia_x.data.engine import DataEngine
@@ -204,6 +205,32 @@ def task_signals(task_id: str, request: Request) -> dict[str, object]:
         ).fetchall()
     items = _signal_items(get_engine(request), rows)
     return {"task_id": task_id, "items": items, "total": len(items)}
+
+
+@router.get("/market/stocks", response_model=StockListResponse)
+def market_stocks(
+    request: Request,
+    keyword: str | None = Query(None, max_length=100, description="按代码或名称子串搜索"),
+    limit: int = Query(50, ge=1, le=200, description="每页条数"),
+    offset: int = Query(0, ge=0, description="分页偏移量"),
+) -> dict[str, object]:
+    """查询本地股票基础列表，支持代码/名称搜索与分页。"""
+    normalized = keyword.strip() if keyword else None
+    items, total, initialized = get_engine(request).get_stock_basic_page(
+        keyword=normalized, limit=limit, offset=offset
+    )
+    if not initialized:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "stock_list_not_seeded",
+                "hint": (
+                    "本地股票清单为空，请先执行 python main.py --names "
+                    "或 python main.py --backfill"
+                ),
+            },
+        )
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/market/{symbol}/ohlcv", response_model=OhlcvResponse)

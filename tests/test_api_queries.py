@@ -268,6 +268,75 @@ def test_task_signals_lists_items_without_pagination(client) -> None:
     assert missing.status_code == 200 and missing.json()["items"] == []
 
 
+# ── /api/market/stocks ──
+
+
+def test_market_stocks_returns_sorted_page_and_total(client) -> None:
+    """股票列表默认按代码升序返回 50 条页面及完整总数。"""
+    response = client.get("/api/market/stocks", headers=AUTH)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "items": [
+            {"symbol": "000001", "name": "平安银行"},
+            {"symbol": "600000", "name": "浦发银行"},
+        ],
+        "total": 2,
+        "limit": 50,
+        "offset": 0,
+    }
+
+
+def test_market_stocks_searches_name_and_symbol(client) -> None:
+    """股票列表关键词既能匹配名称子串，也能匹配代码子串。"""
+    by_name = client.get(
+        "/api/market/stocks", params={"keyword": "平安"}, headers=AUTH
+    )
+    by_symbol = client.get(
+        "/api/market/stocks", params={"keyword": "600000"}, headers=AUTH
+    )
+
+    assert by_name.json()["items"] == [{"symbol": "000001", "name": "平安银行"}]
+    assert by_symbol.json()["items"] == [{"symbol": "600000", "name": "浦发银行"}]
+
+
+def test_market_stocks_empty_database_returns_seed_hint(empty_client) -> None:
+    """股票基础表为空时返回明确同步提示，而非误报普通空列表。"""
+    response = empty_client.get("/api/market/stocks", headers=AUTH)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "stock_list_not_seeded"
+    assert "--names" in response.json()["detail"]["hint"]
+
+
+def test_market_stocks_no_match_returns_empty_page(client) -> None:
+    """已有股票基础数据但关键词无匹配时返回 200 空页。"""
+    response = client.get(
+        "/api/market/stocks", params={"keyword": "不存在的股票"}, headers=AUTH
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "total": 0, "limit": 50, "offset": 0}
+
+
+def test_market_stocks_offset_past_end_keeps_total(client) -> None:
+    """翻到最后一页以外仍返回空项和未过滤总数。"""
+    response = client.get(
+        "/api/market/stocks", params={"offset": 100}, headers=AUTH
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "total": 2, "limit": 50, "offset": 100}
+
+
+def test_market_stocks_requires_auth(empty_client) -> None:
+    """股票列表接口服从现有 API Key 鉴权保护。"""
+    response = empty_client.get("/api/market/stocks")
+
+    assert response.status_code == 401
+
+
 # ── /api/market/{symbol}/ohlcv ──
 
 

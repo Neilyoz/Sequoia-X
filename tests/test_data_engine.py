@@ -101,6 +101,73 @@ def test_stock_basic_persists_and_updates_names(tmp_path: Path) -> None:
     assert engine.get_stock_names([]) == {}
 
 
+def test_stock_basic_page_filters_by_symbol_or_name(tmp_path: Path) -> None:
+    """列表关键词可按代码或名称子串筛选，并返回过滤后的总数。"""
+    engine, _ = make_engine_in(str(tmp_path))
+    engine._save_stock_basic(
+        [
+            ("000001", "平安银行"),
+            ("600000", "浦发银行"),
+            ("600519", "贵州茅台"),
+            ("300750", "宁德时代"),
+        ]
+    )
+
+    by_symbol, symbol_total, initialized = engine.get_stock_basic_page(
+        keyword="000001", limit=50, offset=0
+    )
+    by_name, name_total, _ = engine.get_stock_basic_page(
+        keyword="银行", limit=50, offset=0
+    )
+
+    assert by_symbol == [{"symbol": "000001", "name": "平安银行"}]
+    assert symbol_total == 1
+    assert by_name == [
+        {"symbol": "000001", "name": "平安银行"},
+        {"symbol": "600000", "name": "浦发银行"},
+    ]
+    assert name_total == 2
+    assert initialized is True
+
+
+def test_stock_basic_page_escapes_like_wildcards(tmp_path: Path) -> None:
+    """LIKE 通配符字符作为普通搜索文本，不扩大匹配范围。"""
+    engine, _ = make_engine_in(str(tmp_path))
+    engine._save_stock_basic(
+        [("000001", "百分%银行"), ("000002", "下划_银行"), ("000003", "平安银行")]
+    )
+
+    percent, _, _ = engine.get_stock_basic_page(keyword="%", limit=50, offset=0)
+    underscore, _, _ = engine.get_stock_basic_page(keyword="_", limit=50, offset=0)
+
+    assert percent == [{"symbol": "000001", "name": "百分%银行"}]
+    assert underscore == [{"symbol": "000002", "name": "下划_银行"}]
+
+
+def test_stock_basic_page_orders_and_paginates(tmp_path: Path) -> None:
+    """列表代码升序分页，末页之外返回空项但保留总数。"""
+    engine, _ = make_engine_in(str(tmp_path))
+    engine._save_stock_basic(
+        [("600519", "贵州茅台"), ("300750", "宁德时代"), ("600000", "浦发银行")]
+    )
+
+    items, total, initialized = engine.get_stock_basic_page(
+        keyword=None, limit=2, offset=1
+    )
+    beyond, beyond_total, _ = engine.get_stock_basic_page(
+        keyword=None, limit=2, offset=20
+    )
+
+    assert items == [
+        {"symbol": "600000", "name": "浦发银行"},
+        {"symbol": "600519", "name": "贵州茅台"},
+    ]
+    assert total == 3
+    assert initialized is True
+    assert beyond == []
+    assert beyond_total == 3
+
+
 # Property: sync_stock_basic 只收录上市股票，并把代码与名称一起写库
 def test_sync_stock_basic_filters_and_saves_names(tmp_path: Path) -> None:
     class _FakeRs:
@@ -276,7 +343,13 @@ def test_sync_today_bulk_targets_last_closed_day_before_close(tmp_path: Path) ->
 
     k_calls: list[dict] = []
 
-    with patch("sequoia_x.data.engine._after_close", return_value=False), \
+    class _FixedDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return date(2026, 9, 24)
+
+    with patch("sequoia_x.data.engine.date", _FixedDate), \
+         patch("sequoia_x.data.engine._after_close", return_value=False), \
          patch("baostock.login", return_value=_FakeResult([], error_code="0")), \
          patch("baostock.logout"), \
          patch("baostock.query_trade_dates",
