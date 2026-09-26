@@ -24,6 +24,47 @@ export type SignalListResponse = {
   offset: number;
 };
 
+/** GET /api/market/stocks 的股票基础信息。 */
+export type StockListItem = {
+  symbol: string;
+  name: string;
+};
+
+/** GET /api/market/stocks 的分页信封。 */
+export type StockListResponse = {
+  items: StockListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type StockListQuery = {
+  keyword?: string;
+  limit: number;
+  offset: number;
+};
+
+/** K 线视图可选择的本地日线条数。 */
+export type OhlcvLimit = 60 | 120 | 250 | 500;
+
+/** GET /api/market/{symbol}/ohlcv 的日线数据。 */
+export type OhlcvItem = {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  turnover: number;
+};
+
+export type OhlcvResponse = {
+  symbol: string;
+  xueqiu_code: string;
+  items: OhlcvItem[];
+  total: number;
+};
+
 /** GET /api/strategies 的条目（StrategyInfo）。后端只给类名与 webhook_key，无中文名。 */
 export type StrategyInfo = {
   name: string;

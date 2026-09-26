@@ -14,8 +14,12 @@ import type {
   InfoResponse,
   LoginResponse,
   MeResponse,
+  OhlcvLimit,
+  OhlcvResponse,
   SignalListResponse,
   SignalQuery,
+  StockListQuery,
+  StockListResponse,
   StrategyInfo,
 } from "./types";
 
@@ -39,6 +43,7 @@ export type ApiErrorCode =
   | "unknown_strategy"
   | "task_already_running"
   | "database_not_seeded"
+  | "stock_list_not_seeded"
   | "internal_error"
   | "not_found"
   | "unknown";
@@ -75,6 +80,7 @@ const ERROR_TEXT: Record<ApiErrorCode, string> = {
   unknown_strategy: "策略名称无法识别，请刷新后重选",
   task_already_running: "已有跑批任务在执行，请稍后再试",
   database_not_seeded: "本地行情库尚未回填",
+  stock_list_not_seeded: "本地股票清单尚未同步，请先同步股票名称",
   internal_error: "服务端内部错误，请稍后重试",
   not_found: "接口或资源不存在",
   unknown: "请求失败，请稍后重试",
@@ -219,6 +225,16 @@ function buildSignalQuery(query: SignalQuery): string {
   return `/api/signals?${params.toString()}`;
 }
 
+function buildStockListQuery(query: StockListQuery): string {
+  const params = new URLSearchParams();
+  if (query.keyword?.trim()) {
+    params.set("keyword", query.keyword.trim());
+  }
+  params.set("limit", String(query.limit));
+  params.set("offset", String(query.offset));
+  return `/api/market/stocks?${params.toString()}`;
+}
+
 export const api = {
   /**
    * 用 API Key 换 HttpOnly session cookie（03 §3）。
@@ -245,6 +261,19 @@ export const api = {
   /** 信号列表：看板唯一的数据来源。 */
   signals: (query: SignalQuery): Promise<SignalListResponse> =>
     requestJson<SignalListResponse>(buildSignalQuery(query), { method: "GET" }),
+
+  /** 股票基础列表：本地 stock_basic 搜索和分页。 */
+  stocks: (query: StockListQuery): Promise<StockListResponse> =>
+    requestJson<StockListResponse>(buildStockListQuery(query), { method: "GET" }),
+
+  /** 单只股票本地日线；limit 只能使用看板提供的范围选项。 */
+  ohlcv: (symbol: string, limit: OhlcvLimit): Promise<OhlcvResponse> => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    return requestJson<OhlcvResponse>(
+      `/api/market/${encodeURIComponent(symbol)}/ohlcv?${params.toString()}`,
+      { method: "GET" },
+    );
+  },
 
   /** 服务自述：页脚版本号。失败按"拿不到就不显示"处理，不干扰看板。 */
   info: (): Promise<InfoResponse> => requestJson<InfoResponse>("/api/info", { method: "GET" }),
