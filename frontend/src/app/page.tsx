@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import KlineChart from "./components/KlineChart";
@@ -191,6 +192,12 @@ export default function BoardPage() {
           <p className="mt-1 text-sm text-zinc-500">搜索本地股票清单，查看对应的日 K 线与成交量。</p>
         </div>
         <div className="flex items-center gap-3 text-sm">
+          <Link
+            href="/strategy/"
+            className="rounded border border-zinc-300 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100"
+          >
+            策略选股
+          </Link>
           {authMode === "open" ? (
             <span className="text-amber-700">未启用鉴权（本地开发模式）</span>
           ) : null}

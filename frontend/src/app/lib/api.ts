@@ -21,6 +21,8 @@ import type {
   StockListQuery,
   StockListResponse,
   StrategyInfo,
+  TaskResponse,
+  TaskSignalsResponse,
 } from "./types";
 
 /** 相对路径基准：留空即"当前源"，开发（:3000）与生产（:8000）两种形态都成立。 */
@@ -258,6 +260,25 @@ export const api = {
   /** 策略下拉选项（注册表顺序）。 */
   strategies: (): Promise<StrategyInfo[]> =>
     requestJson<StrategyInfo[]>("/api/strategies", { method: "GET" }),
+
+  /** 运行选中的策略并关闭飞书推送。 */
+  submitDaily: (strategies: string[]): Promise<TaskResponse> =>
+    requestJson<TaskResponse>("/api/tasks/daily", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ push: false, strategies }),
+    }),
+
+  /** 查询单个跑批任务状态。 */
+  task: (taskId: string): Promise<TaskResponse> =>
+    requestJson<TaskResponse>(`/api/tasks/${encodeURIComponent(taskId)}`, { method: "GET" }),
+
+  /** 读取指定任务产生的选股信号。 */
+  taskSignals: (taskId: string): Promise<TaskSignalsResponse> =>
+    requestJson<TaskSignalsResponse>(
+      `/api/tasks/${encodeURIComponent(taskId)}/signals`,
+      { method: "GET" },
+    ),
 
   /** 历史选股信号查询：保留给其他客户端使用，首页展示股票清单。 */
   signals: (query: SignalQuery): Promise<SignalListResponse> =>

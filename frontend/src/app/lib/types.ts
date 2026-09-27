@@ -72,6 +72,27 @@ export type StrategyInfo = {
   has_dedicated_webhook: boolean;
 };
 
+/** POST /api/tasks/daily 与 GET /api/tasks/{task_id} 的任务状态。 */
+export type TaskResponse = {
+  task_id: string;
+  kind: string;
+  status: "pending" | "running" | "success" | "failed";
+  triggered_by: string;
+  params: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+/** GET /api/tasks/{task_id}/signals 的本次任务选股结果。 */
+export type TaskSignalsResponse = {
+  task_id: string;
+  items: SignalItem[];
+  total: number;
+};
+
 /**
  * GET /api/auth/me 的 mode（`api/auth.py:AuthContext` 的三态，是对外契约）：
  * open=服务端未配 API_KEY（本地开发），session=cookie 已鉴权，apikey=凭头放行。
